@@ -93,9 +93,18 @@ described above, then run:
 
 ```sh
 cd flutter
-flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64,android-x64
+flutter build apk --release --obfuscate --split-debug-info=/path/to/private-symbols --split-per-abi --target-platform android-arm,android-arm64,android-x64
 ```
 
 A new source-only repository starts with this modified snapshot. The original
 upstream revision and attribution are recorded above and in NOTICE. The
 original NYM web payment frontend is not part of this Android distribution.
+
+Keep the generated symbol files locally for crash symbolication. They are not
+release assets and can contain development paths. Packaging uses split debug
+information to keep those paths out of the distributed Dart AOT libraries.
+
+For published artifacts, build from a neutral checkout path such as
+`/tmp/kachat-build-src/flutter`: Flutter can embed the generated plugin
+registrant URI even with split debug info. The test release is built there
+and scanned for local personal paths after packaging.
