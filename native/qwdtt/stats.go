@@ -41,7 +41,7 @@ func (s *Stats) RunLoop(shutdown <-chan struct{}) {
 
 // Fixed numeric records reuse upstream worker/traffic counters, without log strings.
 func emitMobileStatistics(workers, up, down int64) {
-	if !mobileProtocolActive || workers < 0 || workers > 2 || up < 0 || down < 0 {
+	if !mobileProtocolActive || workers < 0 || workers > 108 || up < 0 || down < 0 {
 		return
 	}
 	fmt.Fprintf(protocolOutput, "STATS:%d:%d:%d\n", workers, up, down)

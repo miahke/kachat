@@ -56,7 +56,6 @@ class NymbotService {
     Duration timeout = _defaultTimeout,
     bool anon = false,
   }) async {
-    rejectPaymentAction(action);
     if (kAiConsentBotActions.contains(action)) await AiConsent.instance.guard();
     final ws = anon ? null : _apiSocketRequest;
     if (ws != null) {
@@ -224,7 +223,21 @@ class NymbotService {
     String? comment,
     bool anon = false,
   }) async {
-    throw const PaymentsDisabledException();
+    final res = await _botRequest(
+      'create-invoice',
+      <String, dynamic>{
+        'amountSats': amountSats,
+        'tier': tier.wire,
+        'recipientPubkey': ?recipientPubkey,
+        'zapRequest': ?zapRequest,
+        'comment': ?comment,
+      },
+      pubkey: pubkey,
+      auth: auth,
+      anon: anon,
+    );
+    _throwOnStatus(res);
+    return BotInvoice.fromJson(res.data, tier: tier, amountSats: amountSats);
   }
 
   /// Polls settlement, returning the raw `{paid, settled, …}` map.
@@ -234,7 +247,15 @@ class NymbotService {
     Future<Map<String, dynamic>?> Function()? auth,
     bool anon = false,
   }) async {
-    throw const PaymentsDisabledException();
+    final res = await _botRequest(
+      'check-invoice',
+      <String, dynamic>{'invoiceId': invoiceId},
+      pubkey: pubkey,
+      auth: auth,
+      anon: anon,
+    );
+    _throwOnStatus(res);
+    return res.data;
   }
 
   /// Claims credits for a paid invoice; [gifterNym] (`<nym>#<suffix>`) names the sender in a gift DM.
@@ -246,7 +267,19 @@ class NymbotService {
     String? gifterNym,
     bool anon = false,
   }) async {
-    throw const PaymentsDisabledException();
+    final res = await _botRequest(
+      'claim-credits',
+      <String, dynamic>{
+        'invoiceId': invoiceId,
+        'receipt': ?receipt,
+        if (gifterNym != null && gifterNym.isNotEmpty) 'gifterNym': gifterNym,
+      },
+      pubkey: pubkey,
+      auth: auth,
+      anon: anon,
+    );
+    _throwOnStatus(res);
+    return res.data;
   }
 
   /// Local Pro model preference for the next `pm`; null for `?model off`.
@@ -323,7 +356,15 @@ class NymbotService {
     Future<Map<String, dynamic>?> Function(String payload)? signedFor,
     bool anon = false,
   }) async {
-    throw const PaymentsDisabledException();
+    final res = await _botRequest(
+      'transfer-credits',
+      <String, dynamic>{'targetPubkey': targetPubkey},
+      pubkey: pubkey,
+      signedFor: signedFor,
+      anon: anon,
+    );
+    _throwOnStatus(res);
+    return res.data;
   }
 
   Future<Map<String, dynamic>> clearHistory({

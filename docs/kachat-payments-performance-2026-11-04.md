@@ -1,3 +1,5 @@
+> Historical report. Its payment-disabled policy is superseded by [release 3](kachat-release-3-2026-11-04.md), which restores optional commerce behind warnings.
+
 # kachat: payments, About, branding and performance — 2026-11-04
 
 This source patch follows the user's approved icon. No APK build/install or

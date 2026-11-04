@@ -38,7 +38,7 @@ separate network client and is not routed into itself.
   and WebSocket through the adapter and failure while selected tunnel is down.
 - [x] Add the settings entry and page: saved profiles, import/manual edit,
   WG/Raw, TURN/DTLS/DNS/MTU/timeouts, connect/disconnect, upstream-style pipeline,
-  two-worker counters and bounded redacted diagnostic records.
+  selected-worker counters and bounded redacted diagnostic records.
 - [x] Port the existing safe VK login/hash flow and SSH deploy/subscription tools.
 - [x] Route native media through local files; guard WebRTC and native outbound
   authentication paths. Test every identified HTTP and socket creation path.

@@ -1,4 +1,3 @@
-import '../features/payments/payment_policy.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -12557,7 +12556,19 @@ class NostrController {
     String? originalKind,
     String comment = '',
   }) async {
-    throw const PaymentsDisabledException();
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null) return null;
+    final rumor = ZapLogic.buildZapRequest(
+      pubkey: identity.pubkey,
+      recipientPubkey: recipientPubkey,
+      amountSats: amountSats,
+      relays: RelayConfig.defaultRelays,
+      messageId: messageId,
+      originalKind: originalKind,
+      comment: comment,
+    );
+    return service.publishZapRequest(rumor);
   }
 
   /// Announces a paid message zap: gift-wrapped for PM/group, a signed public receipt for channels; deduped by bolt11.
@@ -12567,7 +12578,91 @@ class NostrController {
     required String bolt11,
     String? originalKind,
   }) async {
-    return;
+    if (messageId.isEmpty || recipientPubkey.isEmpty || bolt11.isEmpty) return;
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null) return;
+    final view = _ref.read(appStateProvider).view;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    if (view.kind == ViewKind.group) {
+      // Group rumor tags: g/e/k('14')/p/bolt11 → group members.
+      final group = _ref.read(appStateProvider.notifier).groupById(view.id);
+      if (group == null) return;
+      final ek = _groups?.keysFor(group.id);
+      final rumor = UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.zapReceipt,
+        tags: [
+          ['g', group.id],
+          ['e', messageId],
+          ['k', '${EventKind.dmRumor}'], // '14'
+          ['p', recipientPubkey],
+          ['bolt11', bolt11],
+        ],
+        content: '',
+      );
+      await service.publishGiftWrappedRumor(
+        rumor: rumor,
+        recipients: group.members,
+        encryptTo: ek != null
+            ? (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey)
+            : null,
+      );
+      return;
+    }
+
+    if (view.kind == ViewKind.pm) {
+      // PM rumor tags: e/p/k('1059')/bolt11 → [self, peer].
+      final peer = view.id;
+      final rumor = UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.zapReceipt,
+        tags: [
+          ['e', messageId],
+          ['p', recipientPubkey],
+          ['k', '${EventKind.giftWrap}'], // '1059'
+          ['bolt11', bolt11],
+        ],
+        content: '',
+      );
+      await service.publishGiftWrappedRumor(
+        rumor: rumor,
+        recipients: [identity.pubkey, peer],
+      );
+      return;
+    }
+
+    // Only geohash/named channel kinds are publishable; infer the kind from the view if absent.
+    final isGeo = _ref
+        .read(appStateProvider)
+        .channels
+        .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
+    final kind = originalKind ??
+        (isGeo ? '${EventKind.geoChannel}' : '${EventKind.namedChannel}');
+    if (kind != '${EventKind.geoChannel}' &&
+        kind != '${EventKind.namedChannel}') {
+      return;
+    }
+    final signed = await service.publishMessageZapReceipt(
+      messageId: messageId,
+      recipientPubkey: recipientPubkey,
+      bolt11: bolt11,
+      originalKind: kind,
+      geohash: isGeo ? view.id : null,
+      channel: isGeo ? null : view.id,
+    );
+    if (signed != null) {
+      // Ignore our own receipt's echo; the self-record already counted it.
+      _ownPublishedZapIds.add(signed.id);
+      if (_ownPublishedZapIds.length > 500) {
+        _ownPublishedZapIds.remove(_ownPublishedZapIds.first);
+      }
+      // Archive our published receipt so other clients' backfill sees it.
+      _zapArchive?.archive(signed);
+    }
   }
 
   /// Resolves [pubkey]'s lightning address, fetching the profile if needed and waiting up to [timeout]; null if none.

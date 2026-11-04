@@ -8,6 +8,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../features/chat_archive/chat_archive_ui.dart';
+import '../../features/chat_archive/chat_archive_providers.dart';
 import '../../features/chat_tools/chat_tools_ui.dart';
 import '../../features/composer/composer_model.dart';
 import '../../features/duo/duo_rail.dart';
@@ -136,6 +138,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
 
   // Toggled by a 500ms long-press on a section title.
   bool _reorderMode = false;
+  bool _archiveOpen = false;
 
   bool _channelSearch = false;
   bool _pmSearch = false;
@@ -423,11 +426,18 @@ class _SidebarState extends ConsumerState<Sidebar> {
 
   void _syncNav() {
     final pmOnly = ref.read(settingsProvider).groupChatPMOnlyMode;
-    final channels = ref.read(sidebarChannelRowsProvider).rows;
-    final pms = ref.read(sidebarPmRowsProvider).rows;
+    final archive = ref.read(chatArchiveProvider);
+    final channels = _archiveOpen
+        ? ref.read(sidebarAllChannelRowsProvider).rows
+            .where((r) => archive.contains(r.item.storageKey)).toList()
+        : ref.read(sidebarChannelRowsProvider).rows;
+    final pms = _archiveOpen
+        ? ref.read(sidebarAllPmRowsProvider).rows
+            .where((r) => archive.contains(r.item.key)).toList()
+        : ref.read(sidebarPmRowsProvider).rows;
     _publishNavOrder([
       for (final sec in _order)
-        if (sec == _SectionId.channels && !pmOnly)
+        if (sec == _SectionId.channels && (!pmOnly || _archiveOpen))
           for (final r in channels) ChatView.channel(r.item.key)
         else if (sec == _SectionId.pms)
           for (final r in pms)
@@ -482,6 +492,19 @@ class _SidebarState extends ConsumerState<Sidebar> {
       widget.onItemSelected?.call();
     }
 
+    ref.watch(chatArchiveRevisionProvider);
+    final archive = ref.watch(chatArchiveProvider);
+    final archivedChannels = ref
+        .watch(sidebarAllChannelRowsProvider)
+        .rows
+        .where((r) => archive.contains(r.item.storageKey))
+        .toList();
+    final archivedPms = ref
+        .watch(sidebarAllPmRowsProvider)
+        .rows
+        .where((r) => archive.contains(r.item.key))
+        .toList();
+    final archiveCount = archivedChannels.length + archivedPms.length;
     final controller = ref.read(nostrControllerProvider);
 
     ({List<T> rows, int more}) capped<T>(
@@ -850,10 +873,47 @@ class _SidebarState extends ConsumerState<Sidebar> {
                                 child: _SidebarActions(
                                     onItemSelected: widget.onItemSelected))),
                   ),
-                for (final s in _order)
-                  if (!(settings.groupChatPMOnlyMode &&
-                      s == _SectionId.channels))
-                    sectionFor(s),
+                SliverToBoxAdapter(
+                  child: ChatArchiveHeader(
+                    open: _archiveOpen,
+                    count: archiveCount,
+                    onToggle: () => setState(() => _archiveOpen = !_archiveOpen),
+                    onOpen: () => setState(() => _archiveOpen = true),
+                  ),
+                ),
+                if (_archiveOpen) ...[
+                  if (archiveCount == 0)
+                    SliverToBoxAdapter(
+                      child: ListEmptyNote(text: tr('Archive is empty')),
+                    ),
+                  _rowsSliver(
+                    keys: [
+                      for (final r in archivedChannels)
+                        ValueKey('sidebar-channel-${r.item.key}'),
+                    ],
+                    rowAt: (i) => _channelRow(
+                      archivedChannels[i],
+                      textSize,
+                      i18n,
+                      select,
+                    ),
+                  ),
+                  _rowsSliver(
+                    keys: [for (final r in archivedPms) _pmKey(r.item)],
+                    rowAt: (i) => _pmRow(
+                      archivedPms[i],
+                      textSize,
+                      i18n,
+                      selfPubkey,
+                      select,
+                    ),
+                  ),
+                ],
+                if (!_archiveOpen)
+                  for (final s in _order)
+                    if (!(settings.groupChatPMOnlyMode &&
+                        s == _SectionId.channels))
+                      sectionFor(s),
                 const SliverToBoxAdapter(
                     child: SizedBox(height: NymSpace.s3)),
               ],
@@ -2221,6 +2281,7 @@ class _GroupListItem extends ConsumerWidget {
 
   void _leaveMenu(BuildContext context, WidgetRef ref, Offset at) {
     showSidebarQuickMenu(context, at, groupId: group.id, [
+      ...chatArchiveSidebarItems(ref, 'group-${group.id}'),
       ...chatNavSidebarItems(ref, 'group-${group.id}'),
       ...chatLockSidebarItems(ref, 'group-${group.id}'),
       ...chatToolSidebarItems(context, 'group-${group.id}'),

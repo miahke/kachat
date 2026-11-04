@@ -279,10 +279,9 @@ func runCli() {
 			*numW = 1
 		}
 	} else {
-		if *numW < workersPerGroup {
-			*numW = workersPerGroup
+		if *numW < 1 {
+			*numW = 1
 		}
-		*numW = (*numW / workersPerGroup) * workersPerGroup
 	}
 
 	tp := &TurnParams{

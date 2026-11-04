@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../qwdtt/qwdtt_controller.dart';
 import '../qwdtt/qwdtt_page.dart';
 import 'tor_page.dart';
+import 'proxy_page.dart';
 
 class NetworkSettingsPage extends StatefulWidget {
   const NetworkSettingsPage({super.key, this.controller});
@@ -37,6 +38,7 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
                     'Активный маршрут: ${switch (c.route) {
                       'TOR' => 'Tor',
                       'VK' => 'qWDTT',
+                      'PROXY' => 'HTTP / SOCKS5',
                       'DIRECT' => 'Прямое подключение',
                       _ => 'Заблокирован',
                     }}',
@@ -46,7 +48,10 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
                   Text(
                     c.selected
                         ? switch (c.state) {
-                            'READY' => 'Локальный прокси готов',
+                            'READY' =>
+                              c.route == 'PROXY'
+                                  ? 'Прокси выбран'
+                                  : 'Локальный прокси готов',
                             'STARTING' => 'Устанавливаем соединение…',
                             'RECONNECTING' => 'Восстанавливаем соединение…',
                             'ERROR' => 'Не удалось подключиться',
@@ -113,6 +118,24 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             ),
           ),
           const SizedBox(height: 16),
+          Card(
+            child: ListTile(
+              key: const Key('network-proxy'),
+              leading: const Icon(Icons.vpn_key_outlined),
+              title: const Text('HTTP / HTTPS / SOCKS5'),
+              subtitle: const Text(
+                'Свой прокси или импорт ссылки, включая Telegram SOCKS.',
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => ProxyPage(controller: c),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
           OutlinedButton.icon(
             key: const Key('network-direct'),
             onPressed: c.busy ? null : () => c.command('direct'),
@@ -120,7 +143,7 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             label: const Text('Включить прямое подключение'),
           ),
           const Text(
-            'Этот вариант отключает Tor и qWDTT. Соединения устанавливаются непосредственно с серверами приложения.',
+            'Этот вариант отключает Tor, qWDTT и внешний прокси. Соединения устанавливаются непосредственно с серверами приложения.',
           ),
           if (c.error != null)
             Text(

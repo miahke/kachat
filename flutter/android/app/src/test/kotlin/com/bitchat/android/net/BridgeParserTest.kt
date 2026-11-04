@@ -9,6 +9,19 @@ class BridgeParserTest {
     private val fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567"
     private val cert = java.util.Base64.getEncoder().withoutPadding().encodeToString(ByteArray(52) { 1 })
 
+    @Test fun `accepts copied official Snowflake option layout`() {
+        val line = "Bridge snowflake 192.0.2.3:80 $fingerprint fingerprint=$fingerprint url=https://broker.example.invalid/ fronts=front.example.invalid ice=stun:stun.example.invalid:3478 utls-imitate=hellorandomizedalpn"
+        val parsed = BridgeParser.parse(line).single()
+        assertEquals(BridgeProtocol.SNOWFLAKE, parsed.protocol)
+        assertEquals(parsed.toTorLine(), BridgeParser.parse(parsed.toTorLine()).single().toTorLine())
+    }
+
+    @Test fun `accepts plain Tor bridges and copied tab CRLF whitespace`() {
+        val lines = BridgeParser.parse("Bridge\t192.0.2.1:443\t$fingerprint\r\n  Bridge 192.0.2.2:9001 $fingerprint\n")
+        assertEquals(2, lines.size)
+        assertEquals("192.0.2.1:443 $fingerprint", lines[0].toTorLine())
+    }
+
     @Test fun `imports user obfs4 and webtunnel lines preserving options`() {
         val bridges = BridgeParser.parse("""
             Bridge obfs4 192.0.2.1:443 $fingerprint cert=$cert iat-mode=0

@@ -6,6 +6,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class QwdttSettingsTest {
+    @Test fun `legacy saved profiles without workers retain two channels`() {
+        val gson = com.google.gson.Gson()
+        val json = gson.toJsonTree(NetworkProfile(route = NetworkRoute.VK, serverHost = "server.example.invalid")).asJsonObject
+        json.remove("workers")
+        val legacy = gson.fromJson(json, NetworkProfile::class.java)
+        assertEquals(2, legacy.workerCount)
+        val restored = QwdttSubscriptionImport.parse(QwdttSubscriptionImport.export(legacy, "synthetic-password", "synthetic_hash_123456789")).single()
+        assertEquals(2, restored.profile.workerCount)
+    }
+
     @Test
     fun `sharing round trips supported transport settings and excludes local identity`() {
         val profile =
@@ -32,12 +42,13 @@ class QwdttSettingsTest {
                 dns = "doh:https://dns.example.invalid/dns-query",
                 obfuscation = "video",
                 vkAnonPath = "legacy",
+                workers = 81,
             )
         val uri =
             QwdttSubscriptionImport.export(
                 profile,
                 "synthetic&password",
-                "synthetic_hash_123456789",
+                "synthetic_hash_123456789,synthetic_hash_987654321",
             )
         assertFalse(uri.contains(profile.id))
         assertFalse(uri.contains(profile.deviceId))
@@ -47,8 +58,8 @@ class QwdttSettingsTest {
             imported.profile,
         )
         assertEquals("synthetic&password", imported.secrets["vk-password"])
-        assertEquals("synthetic_hash_123456789", imported.secrets["vk-hash"])
-        assertEquals(2, imported.profile.workerCount)
+        assertEquals("synthetic_hash_123456789,synthetic_hash_987654321", imported.secrets["vk-hash"])
+        assertEquals(81, imported.profile.workerCount)
     }
 
     @Test
@@ -57,8 +68,8 @@ class QwdttSettingsTest {
             QwdttSubscriptionImport.parse(
                 """{"peer":"server.example.invalid","password":"synthetic","hashes":"first_hash_123456\nsecond_hash_123456"}"""
             )
-        assertEquals(2, profiles.size)
-        assertEquals("second_hash_123456", profiles[1].secrets["vk-hash"])
+        assertEquals(1, profiles.size)
+        assertEquals("first_hash_123456,second_hash_123456", profiles.single().secrets["vk-hash"])
     }
 
     @Test

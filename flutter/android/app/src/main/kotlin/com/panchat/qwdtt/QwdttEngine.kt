@@ -38,9 +38,10 @@ class QwdttEngine private constructor(private val context: Context) {
     @Volatile private var endpoint: SocksEndpoint? = null
     @Volatile private var publicError: String? = null
     private var initialized = false
+    private var externalProxy: Map<String, Any>? = null
     private val route: String get() = NetworkSelection.resolve(prefs.getString("route", null), profiles.selected)
     private fun selectRoute(value: String) {
-        require(value in listOf("DIRECT", "VK", "TOR"))
+        require(value in listOf("DIRECT", "VK", "TOR", "PROXY"))
         check(prefs.edit().putString("route", value).commit())
         profiles.selected = NetworkSelection.protected(value)
     }
@@ -52,6 +53,7 @@ class QwdttEngine private constructor(private val context: Context) {
                 when (route) {
                     "VK" -> profiles.activeId?.let { connect(it) } ?: run { state = "ERROR"; publicError = "Выберите профиль qWDTT." }
                     "TOR" -> { val config = torSettings(); connectTor(config["mode"] as String, config["bridges"] as String, config["socksPort"] as Int) }
+                    "PROXY" -> connectProxy(proxySettings())
                     "BLOCKED" -> { state = "ERROR"; publicError = "Настройки маршрута повреждены. Выберите подключение заново." }
                 }
             } catch (_: Exception) { endpoint = null; state = "ERROR"; publicError = "Не удалось восстановить выбранный маршрут." }
@@ -147,6 +149,22 @@ class QwdttEngine private constructor(private val context: Context) {
         }
     }
 
+    @Synchronized fun proxySettings(): Map<String, Any> {
+        val saved = secretStore.get("proxy:settings") ?: return emptyMap()
+        val parsed = Gson().fromJson(saved, Map::class.java)
+        return ExternalProxySettings.validate(parsed)
+    }
+
+    @Synchronized fun connectProxy(settings: Map<*, *>) {
+        val valid = ExternalProxySettings.validate(settings)
+        secretStore.put("proxy:settings", Gson().toJson(valid))
+        selectRoute("PROXY")
+        stop(false)
+        externalProxy = valid
+        // Configuration is selected; HTTPS reachability is checked separately by Dart.
+        state = "READY"
+    }
+
     @Synchronized fun export(id: String): String {
         val selected = profiles.load().first { it.profile.id == id }
         return QwdttSubscriptionImport.export(selected.profile, requireNotNull(selected.secrets["vk-password"]), requireNotNull(selected.secrets["vk-hash"]))
@@ -168,7 +186,10 @@ class QwdttEngine private constructor(private val context: Context) {
         val previous = rows.firstOrNull { it.profile.id == profile.id }
         val secrets = previous?.secrets?.toMutableMap() ?: mutableMapOf("proxy-password" to randomSecret())
         if (!password.isNullOrEmpty()) { require(password.length <= 4096); secrets["vk-password"] = password }
-        if (!hash.isNullOrEmpty()) { require(hash.length in 16..4096 && hash.none(Char::isISOControl) && ',' !in hash); secrets["vk-hash"] = com.bitchat.android.net.vk.VkOAuthParser.callHash(hash) }
+        if (!hash.isNullOrEmpty()) {
+            val normalized = QwdttSubscriptionImport.normalizeHashes(hash)
+            secrets["vk-hash"] = normalized.split(',').joinToString(",") { com.bitchat.android.net.vk.VkOAuthParser.callHash(it) }
+        }
         require(!secrets["vk-password"].isNullOrEmpty())
         rows.removeAll { it.profile.id == profile.id }; rows.add(StoredQwdtt(profile, secrets)); profiles.save(rows); metadata.invalidate()
         if (route == "VK" && profiles.activeId == profile.id) connect(profile.id)
@@ -204,6 +225,7 @@ class QwdttEngine private constructor(private val context: Context) {
             "vkLoggedIn" to vkSession.loggedIn.value,
             "activeId" to if (route == "VK") profiles.activeId else null,
             "state" to state, "generation" to generation, "error" to publicError,
+            "proxy" to if (route == "PROXY" && state == "READY") externalProxy else null,
             "profiles" to metadata.get(), "tor" to torStatus, "captcha" to VkTransportCaptcha.pendingSnapshot(),
             "socks" to endpoint?.let { mapOf("port" to it.port, "username" to it.username, "password" to it.password) },
             "statistics" to mapOf("workers" to statistics.workers, "up" to statistics.upBytes, "down" to statistics.downBytes, "received" to statistics.received),

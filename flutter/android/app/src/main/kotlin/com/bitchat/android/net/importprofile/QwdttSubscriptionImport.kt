@@ -55,15 +55,15 @@ object QwdttSubscriptionImport {
         profile.validate()
         require(profile.route == NetworkRoute.VK)
         require(password.length in 1..4096)
-        require(hash.length <= 4096 && hash.none(Char::isISOControl) && ',' !in hash)
+        val hashes = normalizeHashes(hash)
         val host = if (':' in profile.serverHost) "[${profile.serverHost}]" else profile.serverHost
         val fields =
             linkedMapOf(
                 "name" to profile.name,
                 "peer" to "$host:${profile.serverPort}",
                 "pass" to password,
-                "hashes" to hash,
-                "workers" to "2",
+                "hashes" to hashes,
+                "workers" to profile.workerCount.toString(),
                 "port" to profile.socksPort.toString(),
                 "mode" to profile.vkMode.name.lowercase(),
                 "username" to profile.username,
@@ -171,10 +171,13 @@ object QwdttSubscriptionImport {
             }
         val noDtls = boolean("noDtls", false)
         val name = value("name").ifBlank { "qWDTT" }.take(90)
-        return hashes.mapIndexed { index, hash ->
+        return listOf(run {
+            val hash = hashes.joinToString(",")
+            require(hash.length <= 60000)
             val profile =
                 NetworkProfile(
-                    name = name + if (hashes.size > 1) " #" + (index + 1) else "",
+                    name = name,
+                    workers = value("workers", "workersPerHash").let { if (it.isBlank()) 9 else it.toInt() },
                     route = NetworkRoute.VK,
                     serverHost = address.host.removeSurrounding("[", "]"),
                     serverPort =
@@ -207,6 +210,13 @@ object QwdttSubscriptionImport {
                     if (hash.isNotEmpty()) put("vk-hash", hash)
                 },
             )
-        }
+        })
+    }
+
+    fun normalizeHashes(source: String): String {
+        require(source.length <= 60000) { "Too many call hashes" }
+        val hashes = source.split(Regex("[,\\r\\n]+" )).map(String::trim).filter(String::isNotEmpty)
+        require(hashes.size in 1..32 && hashes.all { it.length in 1..4096 && it.none(Char::isISOControl) }) { "Invalid call hashes" }
+        return hashes.distinct().joinToString(",")
     }
 }

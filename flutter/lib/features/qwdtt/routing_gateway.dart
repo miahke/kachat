@@ -8,21 +8,33 @@ import 'dart:typed_data';
 enum GatewayMode { blocked, direct, socks }
 
 class SocksTarget {
-  SocksTarget(this.port, this.username, this.password) {
-    if (port < 1024 ||
+  SocksTarget(
+    this.port,
+    this.username,
+    this.password, {
+    this.host = '127.0.0.1',
+    this.type = 'SOCKS5',
+  }) {
+    if (port < 1 ||
         port > 65535 ||
-        utf8.encode(username).isEmpty ||
+        host.isEmpty ||
+        host.length > 253 ||
+        !RegExp(r'^[A-Za-z0-9.:%_-]+$').hasMatch(host) ||
+        !{'SOCKS5', 'HTTP', 'HTTPS'}.contains(type) ||
         utf8.encode(username).length > 255 ||
-        utf8.encode(password).isEmpty ||
-        utf8.encode(password).length > 255) {
-      throw ArgumentError('Invalid local proxy');
+        utf8.encode(password).length > 255 ||
+        username.contains(':') ||
+        (username.isEmpty && password.isNotEmpty) ||
+        '$username$password'.contains(RegExp(r'[\x00-\x1f\x7f]'))) {
+      throw ArgumentError('Invalid proxy');
     }
   }
   final int port;
   final String username;
   final String password;
+  final String host, type;
   @override
-  String toString() => 'SocksTarget(loopback, credentials redacted)';
+  String toString() => 'SocksTarget($type, credentials redacted)';
 }
 
 /// One local CONNECT adapter for the lifetime of an isolate. TLS stays end to end.
@@ -194,15 +206,22 @@ class RoutingGateway {
           await _reply(client, 503);
           return;
         }
-        upstream = await _connect('127.0.0.1', target.port, generation);
+        upstream = await _connect(target.host, target.port, generation);
+        if (target.type == 'HTTPS') {
+          final plain = upstream;
+          upstream = await SecureSocket.secure(
+            plain,
+            host: target.host,
+          ).timeout(const Duration(seconds: 15));
+          _sockets.remove(plain);
+          _sockets.add(upstream);
+        }
+        if (generation != _generation) return;
         outgoing = _SocketBytes(upstream);
-        await _socks(
-          upstream,
-          outgoing,
-          target,
-          uri.host,
-          uri.port,
-        ).timeout(const Duration(seconds: 15));
+        await (target.type == 'SOCKS5'
+                ? _socks(upstream, outgoing, target, uri.host, uri.port)
+                : _httpConnect(upstream, outgoing, target, uri.host, uri.port))
+            .timeout(const Duration(seconds: 15));
       }
       outgoing ??= _SocketBytes(upstream);
       if (generation != _generation) return;
@@ -235,19 +254,22 @@ class RoutingGateway {
     String host,
     int port,
   ) async {
-    socket.add([5, 1, 2]);
+    final authenticate = target.username.isNotEmpty;
+    socket.add([5, 1, authenticate ? 2 : 0]);
     await socket.flush();
     final method = await reader.read(2);
-    if (method[0] != 5 || method[1] != 2) {
+    if (method[0] != 5 || method[1] != (authenticate ? 2 : 0)) {
       throw const SocketException('Authentication required');
     }
-    final user = utf8.encode(target.username),
-        pass = utf8.encode(target.password);
-    socket.add([1, user.length, ...user, pass.length, ...pass]);
-    await socket.flush();
-    final auth = await reader.read(2);
-    if (auth[0] != 1 || auth[1] != 0) {
-      throw const SocketException('Authentication failed');
+    if (authenticate) {
+      final user = utf8.encode(target.username),
+          pass = utf8.encode(target.password);
+      socket.add([1, user.length, ...user, pass.length, ...pass]);
+      await socket.flush();
+      final auth = await reader.read(2);
+      if (auth[0] != 1 || auth[1] != 0) {
+        throw const SocketException('Authentication failed');
+      }
     }
     final literal = InternetAddress.tryParse(host);
     final address = literal == null
@@ -269,6 +291,27 @@ class RoutingGateway {
       _ => throw const SocketException('Invalid proxy response'),
     };
     await reader.read(length + 2);
+  }
+
+  Future<void> _httpConnect(
+    Socket socket,
+    _SocketBytes reader,
+    SocksTarget target,
+    String host,
+    int port,
+  ) async {
+    final authority = host.contains(':') ? '[$host]:$port' : '$host:$port';
+    final auth = target.username.isEmpty
+        ? ''
+        : 'Proxy-Authorization: Basic ${base64.encode(utf8.encode('${target.username}:${target.password}'))}\r\n';
+    socket.write(
+      'CONNECT $authority HTTP/1.1\r\nHost: $authority\r\n${auth}Proxy-Connection: Keep-Alive\r\n\r\n',
+    );
+    await socket.flush();
+    final response = await reader.header();
+    if (!RegExp(r'^HTTP/1\.[01] 200(?: |\r)').hasMatch(response)) {
+      throw const SocketException('HTTP proxy refused connection');
+    }
   }
 
   static bool _constantEquals(String a, String b) {

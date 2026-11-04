@@ -1,4 +1,13 @@
 {
+  "Archive chat": "В архив",
+  "Unarchive chat": "Вернуть из архива",
+  "Archived chats": "Архив чатов",
+  "Archive options": "Настройки архива",
+  "Open archive": "Открыть архив",
+  "Hide archive": "Скрыть архив",
+  "Show archive": "Показать архив",
+  "Archive is empty": "Архив пуст",
+  "Chat list": "Список чатов",
   " (optional)": " (необязательно)",
   " and ": " и ",
   " are typing": " печатают",
@@ -2972,5 +2981,17 @@
   "❌ Restore failed: {error}": "❌ Не удалось восстановить: {error}",
   "💭 Reasoning": "💭 Рассуждения",
   "📊 POLL": "📊 ОПРОС",
-  "📊 Voters": "📊 Проголосовавшие"
+  "📊 Voters": "📊 Проголосовавшие",
+  "Payments and the store are at the very end of Information (i). Verify the recipient, amount and invoice independently. Transfers may be irreversible; kachat cannot guarantee a counterparty or refund a payment.": "Платежи и магазин находятся в самом конце раздела «Информация» (i). Самостоятельно проверьте получателя, сумму и счёт. Перевод может быть необратимым; kachat не может гарантировать надёжность получателя или вернуть платёж.",
+  "Payments and store": "Платежи и магазин",
+  "Verify the recipient, amount and invoice independently before continuing. Transfers may be irreversible. kachat cannot guarantee delivery, a counterparty or a refund. Never share your private key or recovery codes.": "Прежде чем продолжить, самостоятельно проверьте получателя, сумму и счёт. Перевод может быть необратимым. kachat не может гарантировать доставку товара, надёжность получателя или возврат средств. Никому не сообщайте свой закрытый ключ и коды восстановления.",
+  "Payment safety": "Безопасность платежей",
+  "I understand, continue": "Понимаю, продолжить",
+  "Open store": "Открыть магазин",
+  "Send a Lightning payment": "Отправить платёж Lightning",
+  "Payment recipient": "Получатель платежа",
+  "Verify the public key and Lightning address with the recipient through a trusted channel.": "Проверьте открытый ключ и адрес Lightning у получателя через доверенный канал связи.",
+  "Recipient public key (npub or hex)": "Открытый ключ получателя (npub или hex)",
+  "Lightning address": "Адрес Lightning",
+  "Enter a valid public key and Lightning address.": "Введите корректный открытый ключ и адрес Lightning."
 }

@@ -45,9 +45,10 @@ data class NetworkProfile(
     val dns: String = "doh-cloudflare",
     val obfuscation: String = "audio",
     val vkAnonPath: String = "vkcalls",
+    val workers: Int = 2,
 ) {
     val workerCount: Int
-        get() = 2
+        get() = if (workers == 0) 2 else workers
 
     fun secretRef(kind: String): String = "$id:$kind"
 
@@ -60,6 +61,7 @@ data class NetworkProfile(
         ) {
             "Invalid route"
         }
+        require(workerCount in 1..108) { "Invalid worker count" }
         require(socksPort in 1024..65535) { "Proxy port must be between 1024 and 65535" }
         require(username.toByteArray(Charsets.UTF_8).size in 1..255) { "Invalid proxy username" }
         require(serverPort in 1..65535 && turnPort in 0..65535) { "Invalid server port" }

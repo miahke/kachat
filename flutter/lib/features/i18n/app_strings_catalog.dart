@@ -6,6 +6,29 @@
 // LocalizationService.sweep / boot_gate + language_select).
 
 const List<String> kAppStringsCatalog = <String>[
+  'Archive chat',
+  'Unarchive chat',
+  'Archived chats',
+  'Archive options',
+  'Open archive',
+  'Hide archive',
+  'Show archive',
+  'Archive is empty',
+  'Chat list',
+
+  "Payments and the store are at the very end of Information (i). Verify the recipient, amount and invoice independently. Transfers may be irreversible; kachat cannot guarantee a counterparty or refund a payment.",
+  "Payments and store",
+  "Verify the recipient, amount and invoice independently before continuing. Transfers may be irreversible. kachat cannot guarantee delivery, a counterparty or a refund. Never share your private key or recovery codes.",
+  "Payment safety",
+  "I understand, continue",
+  "Open store",
+  "Send a Lightning payment",
+  "Payment recipient",
+  "Verify the public key and Lightning address with the recipient through a trusted channel.",
+  "Recipient public key (npub or hex)",
+  "Lightning address",
+  "Enter a valid public key and Lightning address.",
+
   'Payments are disabled in kachat. The app does not verify recipients or guarantee transfer safety.',
   'Payments disabled',
   'Green',

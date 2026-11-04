@@ -6,18 +6,28 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class QwdttSubscriptionImportTest {
+    @Test fun `four hash subscription round trips as one selectable connection`() {
+        val source = """{"peer":"server.example.invalid","password":"synthetic-password","hashes":"synthetic_hash_one_123,synthetic_hash_two_123,synthetic_hash_three_123,synthetic_hash_four_123","workersPerHash":108}"""
+        val imported = QwdttSubscriptionImport.parse(source).single()
+        assertEquals(108, imported.profile.workerCount)
+        val exported = QwdttSubscriptionImport.export(imported.profile, imported.secrets.getValue("vk-password"), imported.secrets.getValue("vk-hash"))
+        val restored = QwdttSubscriptionImport.parse(exported).single()
+        assertEquals(imported.secrets, restored.secrets)
+        assertEquals(108, restored.profile.workerCount)
+    }
+
     @Test
-    fun `imports original JSON and expands hashes without copying device identity`() {
+    fun `imports original JSON as one connection preserving hashes and workers`() {
         val json =
             """{"profiles":[{"name":"Synthetic","peer":"192.0.2.1:56001","password":"synthetic-password","hashes":"synthetic-hash-one,synthetic-hash-two","workers":9}]}"""
         val result = QwdttSubscriptionImport.parse(json)
-        assertEquals(2, result.size)
-        assertEquals(2, result[0].profile.workerCount)
-        assertNotEquals(result[0].profile.deviceId, result[1].profile.deviceId)
-        assertEquals("synthetic-hash-two", result[1].secrets["vk-hash"])
+        assertEquals(1, result.size)
+        assertEquals(9, result[0].profile.workerCount)
+        assertEquals("Synthetic", result[0].profile.name)
+        assertEquals("synthetic-hash-one,synthetic-hash-two", result[0].secrets["vk-hash"])
         assertFalse(result[0].toString().contains("synthetic-password"))
         assertEquals(
-            2,
+            1,
             QwdttSubscriptionImport.parse(Base64.getEncoder().encodeToString(json.toByteArray()))
                 .size,
         )
@@ -39,14 +49,14 @@ class QwdttSubscriptionImportTest {
             QwdttSubscriptionImport.parse(
                 "qwdtt://config?name=qWDTT+-+Main&peer=192.0.2.8&hashes=synthetic_hash_one_abcdefghijklmnop%2Csynthetic_hash_two_abcdefghijklmnop&workers=9&port=9000&pass=synthetic-password"
             )
-        assertEquals(2, result.size)
+        assertEquals(1, result.size)
         result.forEach {
             assertEquals("192.0.2.8", it.profile.serverHost)
             assertEquals(56000, it.profile.serverPort)
             assertEquals(9000, it.profile.socksPort)
-            assertEquals(2, it.profile.workerCount)
+            assertEquals(9, it.profile.workerCount)
         }
-        assertEquals("qWDTT - Main #1", result[0].profile.name)
+        assertEquals("qWDTT - Main", result[0].profile.name)
     }
 
     @Test

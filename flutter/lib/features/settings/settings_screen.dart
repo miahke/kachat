@@ -455,9 +455,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final privacy = _privacy(settings, ctrl);
     final sections = <_SectionSpec>[
       if (Platform.isAndroid) _SectionSpec(
-        key: 'qwdtt', title: 'Сеть · Tor и qWDTT', groups: [
+        key: 'qwdtt', title: 'Сеть и обход блокировок', groups: [
           _GroupSpec(text: 'Tor obfs4 WebTunnel Snowflake мосты qWDTT VK TURN прокси обход блокировок WireGuard Raw подключения сервер подписки',
-            child: ListTile(leading: const Icon(Icons.router_outlined), title: const Text('Tor и qWDTT'),
+            child: ListTile(leading: const Icon(Icons.router_outlined), title: const Text('Tor, qWDTT и прокси'),
               subtitle: const Text('Мосты, ключи подключения, статус и сервер'), trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const NetworkSettingsPage())))),
         ]),

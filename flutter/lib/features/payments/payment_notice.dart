@@ -34,3 +34,29 @@ Future<void> showPaymentsDisabled(BuildContext context) => showDialog<void>(
     ],
   ),
 );
+
+/// No persisted consent: each entry and payment action requires an explicit tap.
+Future<bool> confirmPaymentRisk(BuildContext context, {String? detail}) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(tr('Payment safety')),
+        content: SingleChildScrollView(
+          child: Text(
+            '${tr(kPaymentRisk)}${detail == null ? '' : '\n\n$detail'}',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(tr('Cancel')),
+          ),
+          TextButton(
+            key: const ValueKey('payment-risk-confirm'),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(tr('I understand, continue')),
+          ),
+        ],
+      ),
+    ) ??
+    false;

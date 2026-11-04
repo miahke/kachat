@@ -7,13 +7,16 @@ import org.junit.Test
 
 class TorConfigurationTest {
     private val fp = "0123456789ABCDEF0123456789ABCDEF01234567"
+    @Test fun `plain bridge mode preserves real untransformed Tor bridge lines`() {
+        assertEquals("192.0.2.1:443 $fp", TorConfiguration.bridgeLines("Bridge 192.0.2.1:443 $fp", "PLAIN_BRIDGES"))
+    }
     @Test fun `snowflake builtin is parsed and preserved`() {
         val result = TorConfiguration.bridgeLines("", "SNOWFLAKE")
         assertEquals(BridgeProtocol.SNOWFLAKE, BridgeParser.parse(result).single().protocol)
         assertTrue(result.contains("fronts=www.cdn77.com,www.phpmyadmin.net"))
     }
     @Test fun `selected transport must have matching bridges`() {
-        for (mode in listOf("OBFS4", "WEBTUNNEL")) {
+        for (mode in listOf("PLAIN_BRIDGES", "OBFS4", "WEBTUNNEL")) {
             assertThrows(IllegalArgumentException::class.java) { TorConfiguration.bridgeLines("", mode) }
             assertThrows(IllegalArgumentException::class.java) { TorConfiguration.bridgeLines(TorConfiguration.SNOWFLAKE_BRIDGE, mode) }
         }

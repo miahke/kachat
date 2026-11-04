@@ -22,7 +22,7 @@ fun parseQwdttStatistics(line: String): QwdttStatistics {
     val workers = parts[1].toIntOrNull()
     val up = parts[2].toLongOrNull()
     val down = parts[3].toLongOrNull()
-    require(workers != null && workers in 0..2 && up != null && down != null)
+    require(workers != null && workers in 0..108 && up != null && down != null)
     return QwdttStatistics(workers, up, down, true)
 }
 

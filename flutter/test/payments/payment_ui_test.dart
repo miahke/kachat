@@ -11,6 +11,8 @@ import 'package:nym_bar/core/theme/nym_colors.dart';
 import 'package:nym_bar/features/settings/about_screen.dart';
 import 'package:nym_bar/features/messages/format/message_content.dart';
 import 'package:nym_bar/features/payments/payment_policy.dart';
+import 'package:nym_bar/features/payments/payment_notice.dart';
+import 'package:nym_bar/features/payments/payment_hub.dart';
 import 'package:nym_bar/features/shop/shop_modal.dart';
 
 class _NoNetwork extends HttpOverrides {
@@ -74,6 +76,14 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('kachat'), findsOneWidget);
+      final section = find.byType(InformationPayments);
+      final parentColumn = find
+          .ancestor(of: section, matching: find.byType(Column))
+          .first;
+      expect(
+        (tester.widget<Column>(parentColumn)).children.last,
+        isA<InformationPayments>(),
+      );
       expect(find.text('Warrant canary'), findsNothing);
       expect(find.text('Build integrity'), findsNothing);
       expect(spy.calls, 0);
@@ -96,7 +106,7 @@ void main() {
     expect(find.text('Pay'), findsNothing);
   });
   testWidgets(
-    'obsolete shop routes show only the disabled-payment explanation',
+    'chat shop routes direct to the information entry without opening commerce',
     (tester) async {
       await tester.pumpWidget(
         MaterialApp(
@@ -115,6 +125,63 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text(kPaymentsDisabled), findsOneWidget);
       expect(find.text('Buy'), findsNothing);
+    },
+  );
+  testWidgets(
+    'information commerce entry requires fresh explicit confirmation',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme(),
+          home: const Scaffold(body: InformationPayments()),
+        ),
+      );
+      await tester.tap(find.byKey(const ValueKey('information-open-shop')));
+      await tester.pumpAndSettle();
+      expect(find.text(kPaymentRisk), findsNWidgets(2));
+      expect(
+        find.byKey(const ValueKey('payment-risk-confirm')),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('payment-risk-confirm')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('information-open-shop')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('payment-risk-confirm')),
+        findsOneWidget,
+      );
+    },
+  );
+  testWidgets(
+    'payment confirmation distinguishes cancellation and acceptance',
+    (tester) async {
+      bool? result;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () async {
+                  result = await confirmPaymentRisk(context);
+                },
+                child: const Text('confirm'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('confirm'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(result, false);
+      await tester.tap(find.text('confirm'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('payment-risk-confirm')));
+      await tester.pumpAndSettle();
+      expect(result, true);
     },
   );
 }

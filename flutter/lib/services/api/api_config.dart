@@ -10,7 +10,7 @@ class ApiConfig {
   /// Upstream protocol version retained for backend compatibility.
   static const String appVersion = '3.75.545';
 
-  static const int appBuild = 879;
+  static const int appBuild = 880;
 
   /// Matches the backend's `/Nym(?:chat|bot)App\//i` client gate.
   static const String appUserAgent = 'NymchatApp/$appVersion';

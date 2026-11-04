@@ -40,6 +40,8 @@ class QwdttController extends ChangeNotifier {
 
   Future<Map<String, dynamic>> torSettings() async =>
       await _channel.invokeMapMethod<String, dynamic>('torSettings') ?? {};
+  Future<Map<String, dynamic>> proxySettings() async =>
+      await _channel.invokeMapMethod<String, dynamic>('proxySettings') ?? {};
   Future<String> exportProfile(String id) async {
     final value = await _channel.invokeMethod<String>('export', {'id': id});
     if (value == null || value.isEmpty) {
@@ -234,11 +236,12 @@ class QwdttController extends ChangeNotifier {
     }
     final changed = !const DeepCollectionEquality().equals(_snapshot, value);
     _snapshot = value;
-    final socks = value['socks'] as Map?;
+    final external = value['route'] == 'PROXY';
+    final socks = (external ? value['proxy'] : value['socks']) as Map?;
     final key = !selected
         ? 'DIRECT'
         : state == 'READY' && socks != null
-        ? '${value['generation']}:${socks['port']}:${socks['username']}:${socks['password']}'
+        ? '${value['generation']}:${socks['host']}:${socks['type']}:${socks['port']}:${socks['username']}:${socks['password']}'
         : 'BLOCKED';
     if (_routeKey != key) {
       _probeClient?.close(force: true);
@@ -263,6 +266,8 @@ class QwdttController extends ChangeNotifier {
             socks['port'] as int,
             socks['username'] as String,
             socks['password'] as String,
+            host: external ? socks['host'] as String : '127.0.0.1',
+            type: external ? socks['type'] as String : 'SOCKS5',
           ),
         );
       } else {
@@ -281,23 +286,34 @@ class QwdttController extends ChangeNotifier {
     busy = true;
     error = null;
     final switching =
-        {'connect', 'connectTor', 'disconnect', 'direct'}.contains(method) ||
+        {
+          'connect',
+          'connectTor',
+          'connectProxy',
+          'disconnect',
+          'direct',
+        }.contains(method) ||
         (method == 'delete' && arguments?['id'] == activeId);
     try {
       if (switching) {
         _gateway?.block();
         _routeKey = null;
-        if (method == 'connect' || method == 'connectTor') {
+        if (method == 'connect' ||
+            method == 'connectTor' ||
+            method == 'connectProxy') {
+          final nextRoute = method == 'connectTor'
+              ? 'TOR'
+              : method == 'connectProxy'
+              ? 'PROXY'
+              : 'VK';
           _snapshot = {
             ..._snapshot,
             'selected': true,
             'state': 'STARTING',
-            'route': method == 'connectTor' ? 'TOR' : 'VK',
+            'route': nextRoute,
           };
           // Persist fail-closed selection before awaiting native connection teardown.
-          await _channel.invokeMethod<void>('select', {
-            'route': method == 'connectTor' ? 'TOR' : 'VK',
-          });
+          await _channel.invokeMethod<void>('select', {'route': nextRoute});
         }
         if (method != 'direct') {
           for (final guard in _nativeRouteGuards.toList()) {

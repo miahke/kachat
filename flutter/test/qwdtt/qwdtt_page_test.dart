@@ -55,6 +55,50 @@ class FakeQwdtt extends QwdttController {
 }
 
 void main() {
+  testWidgets('worker slider preserves all selected channels on save', (
+    tester,
+  ) async {
+    final controller = FakeQwdtt();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: QwdttProfileEditor(
+          controller: controller,
+          profile: {
+            'id': 'synthetic-profile',
+            'deviceId': 'synthetic-device',
+            'name': 'Synthetic',
+            'serverHost': 'server.example.invalid',
+            'workers': 54,
+            'hashCount': 4,
+          },
+        ),
+      ),
+    );
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('qwdtt-workers')),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    final slider = tester.widget<Slider>(
+      find.byKey(const Key('qwdtt-workers')),
+    );
+    expect(slider.max, 108);
+    expect(slider.min, 1);
+    expect(slider.value, 54);
+    slider.onChanged!(81);
+    await tester.pump();
+    await tester.scrollUntilVisible(
+      find.text('Сохранить'),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Сохранить'));
+    await tester.pumpAndSettle();
+    final saved =
+        jsonDecode(controller.calls.single.$2!['profile'] as String) as Map;
+    expect(saved['workers'], 81);
+    expect(saved.containsKey('hashCount'), isFalse);
+  });
   testWidgets('saved profile connects through its actual identifier', (
     tester,
   ) async {
@@ -116,7 +160,7 @@ void main() {
       expect(find.text('qWDTT · Локальный прокси готов'), findsOneWidget);
       expect(find.textContaining('не подтверждает доступ'), findsOneWidget);
       expect(find.byIcon(Icons.check_circle), findsOneWidget);
-      expect(find.textContaining('2/2'), findsOneWidget);
+      expect(find.text('Каналы: 2'), findsOneWidget);
     },
   );
   testWidgets('editor preserves obfuscation and DNS selections on save', (
@@ -142,6 +186,8 @@ void main() {
       250,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.drag(find.byType(ListView).first, const Offset(0, -150));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Дополнительные параметры'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.byKey(const Key('qwdtt-obfuscation')));
@@ -158,7 +204,7 @@ void main() {
     expect(profile['obfuscation'], 'video');
     expect(profile['dns'], 'doh-google');
     expect(profile['route'], 'VK');
-    expect(profile.containsKey('workers'), false);
+    expect(profile['workers'], 2);
   });
 
   testWidgets('invalid numeric settings stay in editor without saving', (
@@ -182,6 +228,8 @@ void main() {
       250,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.drag(find.byType(ListView).first, const Offset(0, -150));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Дополнительные параметры'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.byKey(const Key('qwdtt-field-socksPort')));

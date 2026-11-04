@@ -11,7 +11,7 @@ class QwdttTelemetryTest {
         assertEquals(5678L, value.downBytes)
         for (line in
             listOf(
-                "STATS:3:0:0",
+                "STATS:109:0:0",
                 "STATS:1:-1:0",
                 "STATS:1:secret:0",
                 "STATS:1:0:0:extra",

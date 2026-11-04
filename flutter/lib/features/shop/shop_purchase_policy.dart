@@ -1,6 +1,6 @@
-// Payments are disabled in every kachat build and cannot be enabled by settings.
-const bool shopPurchasesDisabled = true;
-const bool botCreditPurchasesDisabled = true;
+// Commerce is available only through the information screen warning gate.
+const bool shopPurchasesDisabled = false;
+const bool botCreditPurchasesDisabled = false;
 
 final RegExp _kSelling = RegExp(
     r'\?buy|\bbuy\b|\bbought\b|top up|purchas|web app|browser',

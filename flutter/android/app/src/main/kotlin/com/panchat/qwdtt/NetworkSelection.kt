@@ -5,7 +5,7 @@ package com.panchat.qwdtt
 object NetworkSelection {
     fun resolve(saved: String?, legacySelected: Boolean): String = when (saved) {
         null -> if (legacySelected) "VK" else "DIRECT"
-        "DIRECT", "VK", "TOR" -> saved
+        "DIRECT", "VK", "TOR", "PROXY" -> saved
         else -> "BLOCKED"
     }
     fun protected(route: String): Boolean = route != "DIRECT"

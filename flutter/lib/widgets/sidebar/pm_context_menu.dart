@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../features/chat_archive/chat_archive_ui.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/utils/haptics.dart';
 import '../../features/chat_tools/chat_tools_ui.dart';
@@ -322,6 +323,7 @@ Future<void> showPmContextMenu(
   final isBlocked = ref.read(appStateProvider).blockedUsers.contains(pubkey);
 
   final items = <SidebarQuickMenuItem>[
+    ...chatArchiveSidebarItems(ref, PmLogic.pmStorageKey(pubkey)),
     ...chatNavSidebarItems(ref, 'pm-${pubkey.toLowerCase()}'),
     ...chatLockSidebarItems(ref, 'pm-${pubkey.toLowerCase()}'),
     ...chatToolSidebarItems(context, PmLogic.pmStorageKey(pubkey)),

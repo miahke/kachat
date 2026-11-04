@@ -23,6 +23,7 @@ class _TorPageState extends State<TorPage> {
     'OBFS4': 'obfs4',
     'SNOWFLAKE': 'Snowflake',
     'DIRECT_TOR': 'Tor без мостов',
+    'PLAIN_BRIDGES': 'Обычные мосты Tor',
   };
   @override
   void initState() {
@@ -75,11 +76,15 @@ class _TorPageState extends State<TorPage> {
         .replaceFirst(RegExp(r'^Bridge\s+'), '')
         .split(RegExp(r'\s+'))
         .first;
-    final detected = {
-      'obfs4': 'OBFS4',
-      'webtunnel': 'WEBTUNNEL',
-      'snowflake': 'SNOWFLAKE',
-    }[first];
+    final detected =
+        {
+          'obfs4': 'OBFS4',
+          'webtunnel': 'WEBTUNNEL',
+          'snowflake': 'SNOWFLAKE',
+        }[first] ??
+        (RegExp(r'^(?:\[.*\]|[0-9.]+):[0-9]+$').hasMatch(first)
+            ? 'PLAIN_BRIDGES'
+            : null);
     if (detected != null && detected != mode) setState(() => mode = detected);
   }
 
@@ -89,7 +94,7 @@ class _TorPageState extends State<TorPage> {
       setState(() => localError = 'Порт должен быть от 1024 до 65535.');
       return;
     }
-    if ((mode == 'OBFS4' || mode == 'WEBTUNNEL') &&
+    if ((mode == 'OBFS4' || mode == 'WEBTUNNEL' || mode == 'PLAIN_BRIDGES') &&
         bridges.text.trim().isEmpty) {
       setState(() => localError = 'Вставьте хотя бы одну полную строку моста.');
       return;
@@ -217,7 +222,9 @@ class _TorPageState extends State<TorPage> {
                   labelText: mode == 'SNOWFLAKE'
                       ? 'Своя строка Snowflake (необязательно)'
                       : 'Мосты — по одному на строке',
-                  hintText: mode == 'OBFS4'
+                  hintText: mode == 'PLAIN_BRIDGES'
+                      ? 'Bridge адрес:порт fingerprint'
+                      : mode == 'OBFS4'
                       ? 'obfs4 адрес:порт fingerprint cert=… iat-mode=0'
                       : mode == 'WEBTUNNEL'
                       ? 'webtunnel адрес:порт fingerprint url=https://… ver=…'

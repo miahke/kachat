@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../chat_archive/chat_archive_ui.dart';
 import '../../core/constants/storage_keys.dart';
 import '../../models/channel.dart';
 import '../../state/app_state.dart';
@@ -46,6 +47,8 @@ List<ChannelMenuAction> buildChannelMenuActions(
 
   if (isDefault) {
     return <ChannelMenuAction>[
+    for (final p in chatArchiveSidebarItems(ref, entry.storageKey))
+      ChannelMenuAction(label: p.label, svg: p.svg, onSelected: p.onSelected),
       ChannelMenuAction(
         label: tr('Default landing channel'),
         svg: NymIcons.sidebarHome,
@@ -59,6 +62,8 @@ List<ChannelMenuAction> buildChannelMenuActions(
   }
 
   return <ChannelMenuAction>[
+    for (final p in chatArchiveSidebarItems(ref, entry.storageKey))
+      ChannelMenuAction(label: p.label, svg: p.svg, onSelected: p.onSelected),
     for (final p in chatNavSidebarItems(ref, entry.storageKey))
       ChannelMenuAction(label: p.label, svg: p.svg, onSelected: p.onSelected),
     for (final p in chatLockSidebarItems(ref, entry.storageKey))

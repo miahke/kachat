@@ -37,6 +37,8 @@ class QwdttChannel(private val activity: Activity, messenger: BinaryMessenger) {
                             "logoutVk" -> { engine.vkSession.logout(); engine.snapshot() }
                             "generateHash" -> engine.vkSession.generateCallHashWithCaptcha { VkCaptchaCoordinator.solve(activity, it) }
                             "solveCaptcha" -> { VkTransportCaptcha.solvePending(activity); engine.snapshot() }
+                            "proxySettings" -> engine.proxySettings()
+                            "connectProxy" -> { engine.connectProxy(call.arguments as? Map<*, *> ?: emptyMap<String, Any>()); engine.snapshot() }
                             "torSettings" -> engine.torSettings()
                             "connectTor" -> { engine.connectTor(requireNotNull(call.argument<String>("mode")), call.argument<String>("bridges") ?: "", call.argument<Int>("socksPort") ?: 19050); engine.snapshot() }
                             "export" -> engine.export(requireNotNull(call.argument<String>("id")))

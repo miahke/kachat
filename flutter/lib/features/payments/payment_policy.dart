@@ -1,31 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-/// kachat has no payment, invoice, wallet or purchase execution surface.
+/// Retained names for chat call sites: payment entry belongs to Information.
 const kPaymentsDisabled =
-    'Payments are disabled in kachat. The app does not verify recipients or guarantee transfer safety.';
-const kPaymentsDisabledTitle = 'Payments disabled';
+    'Payments and the store are at the very end of Information (i). Verify the recipient, amount and invoice independently. Transfers may be irreversible; kachat cannot guarantee a counterparty or refund a payment.';
+const kPaymentsDisabledTitle = 'Payments and store';
+const kPaymentRisk =
+    'Verify the recipient, amount and invoice independently before continuing. Transfers may be irreversible. kachat cannot guarantee delivery, a counterparty or a refund. Never share your private key or recovery codes.';
 
+/// Chat bot commerce commands cannot bypass the information screen entry.
 class PaymentsDisabledException implements Exception {
   const PaymentsDisabledException();
   @override
-  String toString() => 'PaymentsDisabledException';
-}
-
-void rejectPaymentAction(String action) {
-  if ((action.startsWith('shop-') &&
-          !const {
-            'shop-status',
-            'shop-get',
-            'shop-set-active',
-          }.contains(action)) ||
-      const {
-        'create-invoice',
-        'check-invoice',
-        'claim-credits',
-        'transfer-credits',
-        'zap-verify',
-      }.contains(action)) {
-    throw const PaymentsDisabledException();
-  }
+  String toString() => 'Open payments from Information (i).';
 }
 
 /// Match encoded payment payloads, not ordinary discussion of money/Bitcoin.

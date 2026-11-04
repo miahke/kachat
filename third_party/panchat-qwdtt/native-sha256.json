@@ -1,5 +1,5 @@
 {
-  "arm64-v8a/libbitchat_vk.so": "fd9cf76c97e45039c4a99b7b37a29eb446e1116c6bed87b10043d840b44d079e",
-  "armeabi-v7a/libbitchat_vk.so": "5eed74e56a6a9eded027bf662b1ba2e1856542b0af8cc2552379d63396e4d8b5",
-  "x86_64/libbitchat_vk.so": "691a58e8737e7790cd3b1a1db7faaf92feac5ae6fbf7376b9d975f10b9077728"
+  "arm64-v8a/libbitchat_vk.so": "78633dfc6ecd4d884675888526244030471a17a3af1dfea9c3e36bb1758d3897",
+  "armeabi-v7a/libbitchat_vk.so": "1fd23802e8bdca65b6874ca084adadc903bb71276bb53b0f22e546eb286b1c4c",
+  "x86_64/libbitchat_vk.so": "ee05d02fb1ddc218cd3b2b7e1be85e75f5994a99ed385efd83abd014d01da19d"
 }

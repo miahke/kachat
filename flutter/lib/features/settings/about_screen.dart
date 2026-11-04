@@ -1,4 +1,7 @@
+import '../payments/payment_hub.dart';
+
 import 'package:package_info_plus/package_info_plus.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -131,13 +134,16 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      tr('Send feedback, a question, or a bug report. '
-                          'Your message is delivered as an encrypted '
-                          'private message to the Nymchat developer.'),
+                      tr(
+                        'Send feedback, a question, or a bug report. '
+                        'Your message is delivered as an encrypted '
+                        'private message to the Nymchat developer.',
+                      ),
                       style: TextStyle(
-                          color: c.textDim,
-                          fontSize: 11,
-                          height: 1.4),
+                        color: c.textDim,
+                        fontSize: 11,
+                        height: 1.4,
+                      ),
                     ),
                     const SizedBox(height: 16),
                     FormGroup(
@@ -147,47 +153,36 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                         items: [
                           (
                             value: 'General feedback',
-                            label: tr('General feedback')
+                            label: tr('General feedback'),
                           ),
-                          (
-                            value: 'Bug report',
-                            label: tr('Bug report')
-                          ),
+                          (value: 'Bug report', label: tr('Bug report')),
                           (
                             value: 'Feature request',
-                            label: tr('Feature request')
+                            label: tr('Feature request'),
                           ),
-                          (
-                            value: 'Question',
-                            label: tr('Question')
-                          ),
+                          (value: 'Question', label: tr('Question')),
                           (
                             value: 'Spam false positive',
-                            label: tr('Spam false positive')
+                            label: tr('Spam false positive'),
                           ),
                         ],
-                        onChanged: (v) =>
-                            setState(() => _topic = v),
+                        onChanged: (v) => setState(() => _topic = v),
                       ),
                     ),
-                    FormGroup(
-                      label: tr('Message'),
-                      child: _messageBox(),
-                    ),
+                    FormGroup(label: tr('Message'), child: _messageBox()),
                     if (_status != null)
                       Padding(
                         padding: const EdgeInsets.only(top: 4),
                         child: Text(
                           _status!,
                           style: TextStyle(
-                            color: _statusOk
-                                ? c.secondary
-                                : c.danger,
+                            color: _statusOk ? c.secondary : c.danger,
                             fontSize: 12,
                             height: 1.4,
                           ),
                         ),
                       ),
+                    const InformationPayments(),
                   ],
                 ),
               ),
@@ -195,8 +190,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
             _actions(c),
           ],
         ),
-        ModalChrome.closeChip(
-            c, () => Navigator.of(context).pop()),
+        ModalChrome.closeChip(c, () => Navigator.of(context).pop()),
       ],
     );
     return NymDiscardGuard(
@@ -232,7 +226,8 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                     child: ConstrainedBox(
                       constraints: BoxConstraints(
                         maxHeight:
-                            (visibleHeight - 40).clamp(200.0, visibleHeight) * 0.98,
+                            (visibleHeight - 40).clamp(200.0, visibleHeight) *
+                            0.98,
                       ),
                       child: body,
                     ),
@@ -290,11 +285,14 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
         TextSpan(
           children: [
             TextSpan(
-                text: tr('A decentralized, pseudonymous chat built on the ')),
+              text: tr('A decentralized, pseudonymous chat built on the '),
+            ),
             _linkSpan(c, 'Nostr', 'https://nostr.com'),
             TextSpan(
-                text: tr(
-                    " protocol. Inspired by and bridged with Jack Dorsey's ")),
+              text: tr(
+                " protocol. Inspired by and bridged with Jack Dorsey's ",
+              ),
+            ),
             _linkSpan(c, 'Bitchat', 'https://bitchat.free'),
             const TextSpan(text: '.'),
           ],
@@ -353,10 +351,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
       linkUrl: Uri.parse(url),
       child: InkWell(
         onTap: () => _openLink(url),
-        child: Text(
-          text,
-          style: TextStyle(color: c.secondary, fontSize: 12),
-        ),
+        child: Text(text, style: TextStyle(color: c.secondary, fontSize: 12)),
       ),
     );
   }

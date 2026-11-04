@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const workersPerGroup = 2
+const workersPerGroup = 9
 
 const allocateGateInterval = 100 * time.Millisecond
 

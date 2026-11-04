@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../features/chat_archive/chat_archive_providers.dart';
 import '../../features/channels/channel_manager.dart';
 import '../../features/chat_lock/chat_lock_providers.dart';
 import '../../core/utils/nym_utils.dart';
@@ -141,7 +142,7 @@ class SidebarPmEntry {
       : 'pm-${pm!.pubkey.toLowerCase()}';
 }
 
-final sidebarChannelRowsProvider =
+final sidebarAllChannelRowsProvider =
     Provider<SidebarRows<ChannelEntry>>((ref) {
   ref.watch(_channelInputsProvider);
   final app = ref.read(appStateProvider);
@@ -157,9 +158,12 @@ final sidebarChannelRowsProvider =
   final activeChannelKey = (!meshOpen && view.kind == ViewKind.channel)
       ? view.id.toLowerCase()
       : '';
+  ref.watch(chatArchiveRevisionProvider);
+  final archive = ref.watch(chatArchiveProvider);
   final visibleChannels = app.channels
       .where((ch) => !app.blockedChannels.contains(ch.key))
       .where((ch) =>
+          archive.contains(ch.storageKey) ||
           ch.key == kDefaultChannel ||
           ch.key == activeChannelKey ||
           (!app.hiddenChannels.contains(ch.key) &&
@@ -207,7 +211,7 @@ final sidebarChannelRowsProvider =
   ], flag: app.channels.any((ch) => ch.key != kDefaultChannel));
 });
 
-final sidebarPmRowsProvider = Provider<SidebarRows<SidebarPmEntry>>((ref) {
+final sidebarAllPmRowsProvider = Provider<SidebarRows<SidebarPmEntry>>((ref) {
   ref.watch(_pmInputsProvider);
   final app = ref.read(appStateProvider);
   final view = ref.watch(currentViewProvider);
@@ -436,3 +440,22 @@ class NymListOrder {
     return s.row = SidebarRow(u, sig);
   }
 }
+
+final sidebarChannelRowsProvider = Provider<SidebarRows<ChannelEntry>>((ref) {
+  ref.watch(chatArchiveRevisionProvider);
+  final archive = ref.watch(chatArchiveProvider);
+  final all = ref.watch(sidebarAllChannelRowsProvider);
+  return SidebarRows(
+    all.rows.where((r) => !archive.contains(r.item.storageKey)).toList(),
+    flag: all.flag,
+  );
+});
+
+final sidebarPmRowsProvider = Provider<SidebarRows<SidebarPmEntry>>((ref) {
+  ref.watch(chatArchiveRevisionProvider);
+  final archive = ref.watch(chatArchiveProvider);
+  final all = ref.watch(sidebarAllPmRowsProvider);
+  return SidebarRows(
+    all.rows.where((r) => !archive.contains(r.item.key)).toList(),
+  );
+});

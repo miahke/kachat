@@ -296,6 +296,7 @@ fun vkBackend(binary: File, directory: File, secret: (String) -> String?): Netwo
                         "wgKeepalive" to profile.wgKeepaliveSeconds,
                         "deviceId" to profile.deviceId,
                         "hash" to hash,
+                        "workers" to profile.workerCount,
                         "password" to password,
                         "port" to profile.socksPort,
                         "username" to profile.username,

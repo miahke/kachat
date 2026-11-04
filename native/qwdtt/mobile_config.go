@@ -28,6 +28,7 @@ type mobileConfig struct {
 	Mode                 string `json:"mode"`
 	Peer                 string `json:"peer"`
 	Hash                 string `json:"hash"`
+	Workers              int    `json:"workers"`
 	Password             string `json:"password"`
 	Port                 int    `json:"port"`
 	Username             string `json:"username"`
@@ -55,7 +56,7 @@ func emitMobileStage(stage string) {
 }
 
 func readMobileConfig(r io.Reader) (mobileConfig, error) {
-	c := mobileConfig{WGKeepalive: -1}
+	c := mobileConfig{WGKeepalive: -1, Workers: 2}
 	data, err := io.ReadAll(io.LimitReader(r, 65537))
 	if err != nil || len(data) > 65536 {
 		return c, errors.New("configuration too large")
@@ -85,8 +86,20 @@ func readMobileConfig(r io.Reader) (mobileConfig, error) {
 	if c.Port < 1024 || c.Port > 65535 || len(c.Username) < 1 || len(c.Username) > 255 || len(c.SocksPassword) < 1 || len(c.SocksPassword) > 255 {
 		return c, errors.New("proxy requires valid port and authentication")
 	}
-	if len(c.Password) < 1 || len(c.Password) > 4096 || len(c.Hash) < 16 || len(c.Hash) > 4096 || strings.ContainsAny(c.Hash, "\r\n\x00,") {
+	if len(c.Password) < 1 || len(c.Password) > 4096 || len(c.Hash) > 60000 || strings.ContainsAny(c.Hash, "\r\n\x00") {
 		return c, errors.New("invalid connection credentials")
+	}
+	hashes := strings.Split(c.Hash, ",")
+	if len(hashes) > 32 {
+		return c, errors.New("too many hashes")
+	}
+	for _, hash := range hashes {
+		if len(hash) < 16 || len(hash) > 4096 || strings.TrimSpace(hash) != hash {
+			return c, errors.New("invalid call hash")
+		}
+	}
+	if c.Workers < 1 || c.Workers > 108 {
+		return c, errors.New("invalid worker count")
 	}
 	if c.TurnPort < 0 || c.TurnPort > 65535 || len(c.TurnHost) > 253 {
 		return c, errors.New("invalid TURN endpoint")
@@ -132,7 +145,7 @@ func (c mobileConfig) args() []string {
 	if c.Mode == "raw" {
 		mode = "rawtun"
 	}
-	args := []string{"-vk-anon-path", c.VkAnonPath, "-mode", mode, "-n", "2", "-listen", "127.0.0.1:0", "-peer", c.Peer,
+	args := []string{"-vk-anon-path", c.VkAnonPath, "-mode", mode, "-n", strconv.Itoa(c.Workers), "-listen", "127.0.0.1:0", "-peer", c.Peer,
 		"-vk", c.Hash, "-password", c.Password, "-socks", net.JoinHostPort("127.0.0.1", strconv.Itoa(c.Port)),
 		"-socks-auth=true", "-socks-user", c.Username, "-socks-pass", c.SocksPassword,
 		"-dtls-timeout", strconv.Itoa(c.DTLSTimeoutSeconds), "-config-timeout", strconv.Itoa(c.ConfigTimeoutSeconds), "-tunnel-dns", c.TunnelDNS, "-tunnel-mtu", strconv.Itoa(c.TunnelMTU), "-wg-keepalive", strconv.Itoa(c.WGKeepalive),

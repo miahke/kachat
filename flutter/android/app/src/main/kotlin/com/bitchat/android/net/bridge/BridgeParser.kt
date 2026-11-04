@@ -30,7 +30,7 @@ object BridgeParser {
 
     private fun parseLine(line: String): BridgeLine {
         require(line.none { it.isISOControl() && it != '\t' })
-        val words = line.split(Regex("[ \\t]+" )).toMutableList()
+        val words = line.split(Regex("\\s+")).toMutableList()
         if (words.firstOrNull() == "Bridge") words.removeAt(0)
         val protocol = when (words.firstOrNull()) {
             "obfs4" -> BridgeProtocol.OBFS4.also { words.removeAt(0) }

@@ -47,7 +47,7 @@ creating call hashes. Connect selects qWDTT persistently. Stop keeps the route
 blocked; direct internet access requires the separate explicit Direct action.
 The local SOCKS listener uses loopback and generated password authentication.
 
-WG / authenticated Raw v2, two workers, automatic DTLS/RTP AEAD selection,
+WG / authenticated Raw v2, selectable workers, automatic DTLS/RTP AEAD selection,
 TURN TCP/UDP, ports, DNS, MTU, keepalive and timeouts use the existing core.
 Readiness comes from the actual core protocol, not from launching the process.
 Diagnostics expose only whitelisted stages and counters, never raw core logs.
@@ -114,3 +114,9 @@ and scanned for local personal paths after packaging.
 See `third_party/tor/README.md` for pinned Arti/PT sources and rebuilding all three ABIs. Native checksums are in `third_party/tor/SHA256SUMS`; run `tools/arti-build/verify-checksums.sh` from the repository root. Tor and qWDTT share one persistent route selector. Snowflake has a built-in public configuration; obfs4 and WebTunnel require the user’s bridge lines. No destination DNS is sent outside the selected SOCKS route. VK/TURN/Tor bootstrap, official login/captcha and explicit SSH remain independent service connections.
 
 Upstream qWDTT subscription `port` is the local SOCKS port; a remote port belongs in `peer=host:port` (default 56000). Re-import old subscriptions if the old importer misinterpreted this field; existing deliberately configured server ports are not silently rewritten. See `docs/qwdtt-settings-parity.md`.
+
+## Release 3
+
+One subscription now retains its hashes in one profile and exports them intact. Worker count is selectable (1..27 per available hash, at most 108); older profiles without the field retain two workers. Existing split cards are not automatically deleted or merged: re-import the original subscription to create one unified profile, then remove unwanted old cards.
+
+External HTTP/HTTPS CONNECT and SOCKS5 use the same protected gateway, including remote destination DNS and no direct fallback. Proxy credentials use the Android secret store. Importing is separate from connecting; Telegram MTProto links are diagnosed rather than treated as SOCKS. Plain Tor bridges with an RSA fingerprint are also exposed in the Tor selector.

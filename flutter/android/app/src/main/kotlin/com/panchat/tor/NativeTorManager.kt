@@ -89,9 +89,10 @@ object TorConfiguration {
     const val SNOWFLAKE_BRIDGE = "snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://1098762253.rsc.cdn77.org/ fronts=www.cdn77.com,www.phpmyadmin.net ice=stun:stun.antisip.com:3478,stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.nextcloud.com:3478,stun:stun.bethesda.net:3478,stun:stun.nextcloud.com:443 utls-imitate=hellorandomizedalpn"
 
     fun bridgeLines(text: String, mode: String): String {
-        require(mode in setOf("DIRECT_TOR", "OBFS4", "WEBTUNNEL", "SNOWFLAKE"))
+        require(mode in setOf("DIRECT_TOR", "PLAIN_BRIDGES", "OBFS4", "WEBTUNNEL", "SNOWFLAKE"))
         if (mode == "DIRECT_TOR") return ""
         val expected = when (mode) {
+            "PLAIN_BRIDGES" -> BridgeProtocol.PLAIN
             "OBFS4" -> BridgeProtocol.OBFS4
             "WEBTUNNEL" -> BridgeProtocol.WEBTUNNEL
             else -> BridgeProtocol.SNOWFLAKE

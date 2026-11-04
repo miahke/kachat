@@ -1,4 +1,3 @@
-import '../../features/payments/payment_policy.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show HttpDate;
@@ -1130,14 +1129,32 @@ class ApiClient {
     String? providerPubkey,
     Map<String, dynamic>? receipt,
   }) async {
-    return false;
+    try {
+      final payload = jsonEncode({
+        'pr': pr,
+        'verifyUrl': verifyUrl,
+        'providerPubkey': providerPubkey,
+        'receipt': receipt,
+      });
+      final res = await _client.post(
+        Uri.parse(zapVerifyUrl()),
+        headers: _headers({'Content-Type': 'application/json'}),
+        body: payload,
+      );
+      _trackApiData('zap-verify',
+          sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
+      if (res.statusCode != 200) return false;
+      final data = jsonDecode(_utf8Body(res));
+      return data is Map && data['paid'] == true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// `POST /api/storage` for shop-* actions; [body] carries `action` and any auth. Throws [ApiException] on non-2xx.
   Future<Map<String, dynamic>> storageAction(Map<String, dynamic> body,
       {bool socket = true}) async {
     final action = (body['action'] ?? 'other').toString();
-    rejectPaymentAction(action);
     // WS-first; a non-null socket result is already a 2xx with no `error`.
     final ws = socket ? await _trySocket(action, body, stream: false) : null;
     if (ws != null) return ws.data;
@@ -1274,7 +1291,6 @@ class ApiClient {
   /// `POST /api/bot` for Nymbot credit actions; same auth contract as [storageAction], bound to [botUrl].
   Future<Map<String, dynamic>> botAction(Map<String, dynamic> body) async {
     final action = (body['action'] ?? 'other').toString();
-    rejectPaymentAction(action);
     final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(botUrl),

@@ -158,7 +158,7 @@ class _QwdttPageState extends State<QwdttPage> {
                         spacing: 12,
                         runSpacing: 4,
                         children: [
-                          Text('Каналы: ${controller.statistics['workers']}/2'),
+                          Text('Каналы: ${controller.statistics['workers']}'),
                           Semantics(
                             label: 'Отправлено',
                             child: Row(
@@ -536,6 +536,7 @@ class _QwdttProfileEditorState extends State<QwdttProfileEditor> {
   void initState() {
     super.initState();
     profile = {...?widget.profile};
+    profile.putIfAbsent('workers', () => widget.profile == null ? 9 : 2);
     profile.putIfAbsent('id', () => const Uuid().v4());
     profile.putIfAbsent('deviceId', () => const Uuid().v4());
     mode = profile['vkMode'] as String? ?? 'WG';
@@ -590,12 +591,13 @@ class _QwdttProfileEditorState extends State<QwdttProfileEditor> {
     child: TextField(
       key: Key('qwdtt-field-$key'),
       controller: fields[key],
+      onChanged: key == 'hash' ? (_) => setState(() {}) : null,
       obscureText: secret,
       autocorrect: false,
       enableSuggestions: false,
       autofillHints: const [],
       maxLength: secret
-          ? 4096
+          ? (key == 'hash' ? 60000 : 4096)
           : key == 'dns'
           ? 2048
           : 253,
@@ -611,6 +613,21 @@ class _QwdttProfileEditorState extends State<QwdttProfileEditor> {
       ),
     ),
   );
+  int get _maxWorkers {
+    final entered = fields['hash']!.text.trim();
+    final count = entered.isEmpty
+        ? ((profile['hashCount'] as num?)?.toInt() ?? 1)
+        : entered
+              .split(RegExp(r'[,\r\n]+'))
+              .where((s) => s.trim().isNotEmpty)
+              .toSet()
+              .length;
+    return 27 * count.clamp(1, 4);
+  }
+
+  int get _selectedWorkers =>
+      ((profile['workers'] as num?)?.toInt() ?? 9).clamp(1, _maxWorkers);
+
   Future<void> save() async {
     setState(() {
       saving = true;
@@ -621,6 +638,7 @@ class _QwdttProfileEditorState extends State<QwdttProfileEditor> {
         ...profile,
         'route': 'VK',
         'vkMode': mode,
+        'workers': _selectedWorkers,
         'autoPeerMode': transport == 'AUTO',
         'noDtls': transport == 'RTP',
         'turnTcp': profile['turnTcp'] ?? true,
@@ -644,6 +662,7 @@ class _QwdttProfileEditorState extends State<QwdttProfileEditor> {
             ? int.parse(e.value.text.trim())
             : e.value.text.trim();
       }
+      out.remove('hashCount');
       _validate(out);
       if (widget.profile == null && fields['password']!.text.isEmpty) {
         throw const FormatException('Укажите пароль сервера.');
@@ -842,7 +861,7 @@ class _QwdttProfileEditorState extends State<QwdttProfileEditor> {
         ),
         field(
           'hash',
-          'Хэш звонка или ссылка VK (пусто — сохранить прежний)',
+          'Хэши звонков или ссылки VK через запятую (пусто — сохранить прежние)',
           secret: true,
         ),
         if (widget.controller.vkLoggedIn)
@@ -867,8 +886,19 @@ class _QwdttProfileEditorState extends State<QwdttProfileEditor> {
         const Padding(
           padding: EdgeInsets.symmetric(vertical: 12),
           child: Text(
-            'Используются два транспортных канала. Обход действует только внутри kachat через локальный прокси; системный VPN не создаётся. Готовый ключ обычно уже содержит параметры сервера.',
+            'Все хэши используются одним подключением. Обход действует только внутри kachat через локальный прокси; системный VPN не создаётся.',
           ),
+        ),
+        Text('Транспортных каналов: $_selectedWorkers'),
+        Slider(
+          key: const Key('qwdtt-workers'),
+          min: 1,
+          max: _maxWorkers.toDouble(),
+          divisions: _maxWorkers - 1,
+          value: _selectedWorkers.toDouble(),
+          label: '$_selectedWorkers',
+          onChanged: (value) =>
+              setState(() => profile['workers'] = value.round()),
         ),
         ExpansionTile(
           title: const Text('Дополнительные параметры'),
