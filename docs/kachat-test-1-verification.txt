@@ -1,0 +1,11 @@
+kachat test.1; Release/AOT; API 29+, applicationId com.panchat.nym, base versionCode 878 (Flutter ABI-specific APK version codes)
+All three APK signatures valid and match previous local test APK certificate.
+No Dart debug kernel; native qWDTT checksums match manifest; zipalign -c -P 16 4 passed.
+No supplied personal-server credentials or local personal paths found in APK members.
+Test signing certificate SHA256: 1b3d863694156be2078b1d8a7bc1d2b692e4d93068b841e9638c16494c59d719
+Physical Pixel validation remains pending.
+
+SHA256SUMS
+33c7f8df6245538429d215fb9c18cc35981cbd4c59431e9e5223d778630c2613  kachat-test.1-armeabi-v7a.apk
+002f9ef23f5aa77c9f60c7df5c30855f9ba0a7aea13e7088eea4554787b3175d  kachat-test.1-arm64-v8a.apk
+9597eff3706b6042a3b89b4047983f2212bae7633068c26a18587df37b70faa5  kachat-test.1-x86_64.apk
