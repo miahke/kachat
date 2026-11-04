@@ -1,0 +1,171 @@
+// Startup hydration of NIP-30 custom emoji and packs; live updates are `LiveCustomEmojiNotifier` in app_state.dart.
+
+import 'dart:convert';
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../services/api/api_config.dart';
+import '../../services/storage/revocable_prefs.dart';
+
+import 'emoji_data.dart';
+
+/// Persisted keys: loose [shortcode,url] pairs (max 5000) and packs (max 200).
+const String kCustomEmojiMapKey = 'nym_custom_emojis';
+const String kCustomEmojiPacksKey = 'nym_custom_emoji_packs';
+const String kCustomEmojiPinnedKey = 'nym_custom_emoji_pinned';
+const String kEmojiPacksUsedKey = 'nym_emoji_packs_used';
+final RegExp kEmojiPackCoordRx =
+    RegExp(r'^30030:[0-9a-f]{64}:[^\x00-\x1f\x7f]{0,1024}$');
+
+final RegExp _rxShortcode = RegExp(r'^[a-zA-Z0-9_]+$');
+
+final RegExp _rxUrl = RegExp(r'^https?://', caseSensitive: false);
+
+/// One NIP-30 emoji pack (kind 30030).
+class CustomEmojiPack {
+  const CustomEmojiPack({
+    required this.pubkey,
+    required this.identifier,
+    required this.title,
+    required this.createdAt,
+    required this.emojis,
+  });
+
+  final String pubkey;
+  final String identifier;
+  final String title;
+  final int createdAt;
+
+  /// (shortcode, url) entries, at most 120.
+  final List<({String shortcode, String url})> emojis;
+
+  String get key => '$pubkey:$identifier';
+}
+
+class CustomEmojiState {
+  const CustomEmojiState({
+    this.codeToUrl = const {},
+    this.packs = const [],
+    this.tagged = const {},
+  });
+
+  /// shortcode -> original (un-proxied) image url.
+  final Map<String, String> codeToUrl;
+
+  /// Loaded packs, deduped by [CustomEmojiPack.key].
+  final List<CustomEmojiPack> packs;
+
+  final Set<String> tagged;
+
+  bool get isEmpty => codeToUrl.isEmpty;
+
+  static const empty = CustomEmojiState();
+}
+
+/// Loads cached emoji, requiring a valid shortcode and http(s) url and never shadowing built-in shortcodes.
+CustomEmojiState loadCustomEmojiState(SharedPreferences prefs,
+        {bool Function(String key)? skipPack}) =>
+    loadCustomEmojiStateWith(prefs.getString, skipPack: skipPack);
+
+CustomEmojiState loadCustomEmojiStateWith(String? Function(String key) read,
+    {bool Function(String key)? skipPack}) {
+  final codeToUrl = <String, String>{};
+  final tagged = <String>{};
+
+  void register(String? shortcode, String? url) {
+    if (shortcode == null || url == null) return;
+    if (!_rxShortcode.hasMatch(shortcode) || !_rxUrl.hasMatch(url)) return;
+    if (kEmojiShortcodeMap.containsKey(shortcode.toLowerCase())) return;
+    codeToUrl[shortcode] = url;
+  }
+
+  // Array of [shortcode, url] pairs.
+  final rawMap = read(kCustomEmojiMapKey);
+  if (rawMap != null && rawMap.isNotEmpty) {
+    try {
+      final decoded = jsonDecode(rawMap);
+      if (decoded is List) {
+        for (final entry in decoded) {
+          if (entry is List && entry.length >= 2) {
+            register(entry[0] as String?, entry[1] as String?);
+            if (entry.length >= 3 &&
+                entry[2] == 1 &&
+                codeToUrl[entry[0]] == entry[1]) {
+              tagged.add(entry[0] as String);
+            }
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  final packs = <CustomEmojiPack>[];
+  final seenPackKeys = <String>{};
+  for (final rawPacks in [read(kCustomEmojiPinnedKey), read(kCustomEmojiPacksKey)]) {
+  if (rawPacks != null && rawPacks.isNotEmpty) {
+    try {
+      final decoded = jsonDecode(rawPacks);
+      if (decoded is List) {
+        for (final p in decoded) {
+          if (p is! Map) continue;
+          final pubkey = p['pubkey'] as String?;
+          final rawEmojis = p['emojis'];
+          if (pubkey == null || rawEmojis is! List || rawEmojis.isEmpty) {
+            continue;
+          }
+          final identifier = (p['identifier'] as String?) ?? '';
+          final key = '$pubkey:$identifier';
+          if (seenPackKeys.contains(key)) continue;
+          final skip = skipPack?.call(key) ?? false;
+          final emojis = <({String shortcode, String url})>[];
+          for (final e in rawEmojis) {
+            if (e is! Map) continue;
+            final sc = e['shortcode'] as String?;
+            final url = e['url'] as String?;
+            if (sc == null || url == null) continue;
+            if (!_rxShortcode.hasMatch(sc) || !_rxUrl.hasMatch(url)) continue;
+            emojis.add((shortcode: sc, url: url));
+            if (!skip) register(sc, url);
+          }
+          if (emojis.isEmpty) continue;
+          seenPackKeys.add(key);
+          packs.add(CustomEmojiPack(
+            pubkey: pubkey,
+            identifier: identifier,
+            // Title kept verbatim; the 'Emoji pack' fallback is applied at render time.
+            title: (p['title'] as String?) ?? '',
+            createdAt: (p['created_at'] as num?)?.toInt() ?? 0,
+            emojis: emojis,
+          ));
+        }
+      }
+    } catch (_) {}
+  }
+  }
+
+  // Newest first; approximates the PWA order without live ownership info.
+  packs.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+  return CustomEmojiState(codeToUrl: codeToUrl, packs: packs, tagged: tagged);
+}
+
+void Function(String code)? customEmojiMissingSink;
+
+void noteMissingCustomEmoji(String code) => customEmojiMissingSink?.call(code);
+
+/// Proxied emoji image URL, or [url] verbatim when no proxy base is configured.
+String proxiedEmojiUrl(String url, String? proxyBase) {
+  if (ApiConfig.directMedia || proxyBase == null || proxyBase.isEmpty) return url;
+  return '$proxyBase?emoji=1&url=${Uri.encodeQueryComponent(url)}';
+}
+
+/// Overridden where the picker mounts and in tests; empty by default so nothing reads prefs at import.
+final customEmojiStateProvider = Provider<CustomEmojiState>(
+  (ref) => CustomEmojiState.empty,
+);
+
+/// Resolved lazily so the stores build only when a picker opens.
+final emojiPrefsProvider = FutureProvider<SharedPreferences>(
+  (ref) => ref.watch(sharedPrefsProvider.future),
+);

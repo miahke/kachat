@@ -1,0 +1,4869 @@
+import '../../features/payments/payment_policy.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderEditable;
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../core/theme/nym_colors.dart';
+import '../../core/utils/haptics.dart';
+import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
+import '../../features/layout/layout_model.dart';
+import '../../features/toasts/toast_center.dart';
+import '../../features/toasts/toast_model.dart';
+import '../common/css_focus_ring.dart';
+import '../common/nym_focusable.dart';
+import '../common/nym_avatar.dart';
+import '../common/nym_label.dart';
+import '../nym_icons.dart';
+import '../../features/ai_consent/ai_consent.dart';
+import '../../features/autocomplete/autocomplete_dropdown.dart';
+import '../../features/mesh/mesh_controller.dart';
+import '../../features/autocomplete/autocomplete_queries.dart';
+import '../../features/autocomplete/autocomplete_triggers.dart';
+import '../../features/autocomplete/pending_edit.dart';
+import '../../features/shortcuts/escape_layers.dart';
+import '../../features/shortcuts/shortcuts.dart';
+import '../../features/group_tools/group_tools_service.dart' show GtChat;
+import '../../features/group_tools/group_tools_ui.dart';
+import '../../features/commands/command_handler.dart';
+import '../../features/commands/command_i18n.dart';
+import '../../features/commands/command_palette.dart';
+import '../../features/commands/command_registry.dart';
+import '../../features/composer/composer_conn.dart';
+import '../../features/composer/composer_menus.dart';
+import '../../features/composer/composer_model.dart';
+import '../../features/composer/send_as_model.dart';
+import '../../features/send_as/send_as_service.dart' show SendAsResult;
+import '../../features/accounts/account_host.dart' show accountsProvider;
+import '../../services/relay/queued_sends.dart';
+import '../../features/dm_polls/dm_polls_providers.dart';
+import '../../features/dm_polls/dm_polls_service.dart' show DmPollsService;
+import '../../features/emoji/custom_emoji.dart';
+import '../../features/emoji/emoji_block.dart';
+import '../../features/emoji/emoji_data.dart';
+import '../../features/emoji/emoji_picker.dart';
+import '../../features/emoji/gif_picker.dart';
+import '../../features/groups/group_logic.dart';
+import '../../features/chat_nav/chat_nav_ui.dart';
+import '../../features/chat_nav/chat_nav_providers.dart';
+import '../../features/i18n/i18n.dart';
+import '../../features/identity/dev_nsec_modal.dart';
+import '../../features/media_notes/media_note_sender.dart';
+import '../../features/media_notes/media_notes.dart';
+import '../../features/media_notes/media_options_bar.dart';
+import '../../features/media_notes/once_crypto.dart';
+import '../../features/media_notes/photo_compress.dart';
+import '../../features/media_notes/video_note_recorder.dart';
+import '../../features/media_notes/voice_record_bar.dart';
+import '../../features/media_notes/voice_recorder.dart';
+import '../../features/messages/format/message_content.dart'
+    show InlineEmojiText, TimestampChip, openFullscreenMedia, proxiedMedia;
+import '../../features/messages/format/nym_format.dart' show NymFormat;
+import '../../features/messages/inline_network_image.dart';
+import '../../features/nymbot/nymbot_models.dart';
+import '../../features/pms/upload_activity.dart';
+import '../../features/polls/poll_create_modal.dart';
+import '../../features/shop/cosmetics.dart';
+import '../../features/translate/translate_languages.dart';
+import '../../features/translate/translate_service.dart';
+import '../../features/search/unified_search_panel.dart';
+import '../../models/user.dart' show UserStatus;
+import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
+import '../context_menu/interaction_hooks.dart';
+import 'clipboard_image_paste.dart';
+import 'composer_format.dart';
+import 'composer_markdown.dart';
+import 'message_row.dart' show GroupInfoMember, encodeGroupInfoSystemMessage;
+import '../../features/chat_lock/chat_lock_providers.dart';
+import '../common/hollow_bullet.dart';
+import '../common/nym_field.dart';
+import '../sidebar/sidebar_chrome.dart';
+import '../common/nym_tooltip.dart';
+import '../../features/composer/composer_drafts.dart';
+
+export '../../features/composer/composer_drafts.dart' show ComposerDrafts;
+
+final composerOverhangProvider = StateProvider<double>((ref) => 0);
+
+List<ChannelResult> channelAutocompleteResults(
+    AppState state, String query, String currentKey) {
+  final counts = <String, int>{};
+  state.messages.forEach((key, msgs) {
+    if (key.startsWith('#') && !state.isChannelHidden(key)) {
+      counts[key.substring(1)] = state.visibleMessageCount(msgs);
+    }
+  });
+  return [
+    for (final r in queryChannels(
+      search: query,
+      channels: [
+        for (final ch in state.channels)
+          if (!state.isChannelHidden(ch.key)) ch
+      ],
+      messageChannelCounts: counts,
+      currentKey: currentKey,
+    ))
+      if (!state.isChannelHidden(r.name)) r,
+  ];
+}
+
+class ComposerOverhangInset extends ConsumerWidget {
+  const ComposerOverhangInset({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => Padding(
+        padding: EdgeInsets.only(bottom: ref.watch(composerOverhangProvider)),
+        child: child,
+      );
+}
+
+/// The message composer: input, toolbar buttons and send.
+class Composer extends ConsumerStatefulWidget {
+  const Composer({super.key, required this.compact});
+
+  /// Mobile/tablet stacks the toolbar below the input.
+  final bool compact;
+
+  @override
+  ConsumerState<Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends ConsumerState<Composer>
+    with WidgetsBindingObserver {
+  final _controller = EmojiSentinelController();
+  final _focus = FocusNode();
+  final _sendMenuFocus = FocusNode(debugLabel: 'sendMenuBtn');
+
+  // Only one picker popover is open at a time.
+  final _emojiPortal = OverlayPortalController();
+  final _emojiAnchor = LayerLink();
+  String _pickerTab = 'emoji';
+  final GlobalKey _attachKey = GlobalKey();
+  final GlobalKey _sendSplitKey = GlobalKey();
+
+  SharedPreferences? _prefs;
+  List<String> _recents = const [];
+
+  // Live NIP-30 custom emoji, a superset of the cached state, synced each build.
+  CustomEmojiState _customEmojis = CustomEmojiState.empty;
+
+  // Quote/edit are deferred to send: a chip sits above the input while the typed text stays clean.
+  ({String author, String text, String fullText})? _pendingQuote;
+  String _pendingQuoteId = '';
+  PendingEdit? _pendingEdit;
+
+  // Each conversation switch stashes the outgoing draft, clears quote/edit, and restores the incoming draft.
+  String? _activeDraftKey;
+
+  late final String _draftOwner =
+      ref.read(accountsProvider)?.changes.value.active ?? '';
+
+  /// Stored expanded (`:code:` text) so drafts never carry sentinel chars whose allocations can be dropped.
+  void _saveCurrentDraft() {
+    final key = _activeDraftKey;
+    if (key == null) return;
+    ComposerDrafts.save(key, _controller.expand(_controller.text));
+  }
+
+  /// No-ops when the input already holds that exact text.
+  void _restoreDraftForContext(ChatView view) {
+    final key = ComposerDrafts.keyFor(view, owner: _draftOwner);
+    _activeDraftKey = key;
+    final draft = ComposerDrafts.restore(key);
+    if (_controller.text == draft) return;
+    _controller.text = draft;
+    _controller.selection =
+        TextSelection.collapsed(offset: _controller.text.length);
+    // Recompute popout and autocomplete state for the restored text.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _activeDraftKey == key) _onInputChanged();
+      });
+      return;
+    }
+    _onInputChanged();
+  }
+
+  /// Save the outgoing draft, clear the quote chip, cancel an edit, then restore the incoming draft.
+  void _onViewSwitched(ChatView view) {
+    if (!mounted) return;
+    _saveCurrentDraft();
+    _clearQuote();
+    if (_pendingEdit != null) _cancelEdit();
+    _restoreDraftForContext(view);
+  }
+
+  final _translatePortal = OverlayPortalController();
+  List<EscapeLayer> _escapeLayers = const [];
+  final _translateAnchor = LayerLink();
+  final _translateSearchController = TextEditingController();
+  final _translateSearchFocus = FocusNode(debugLabel: 'translateSearch');
+  final _translateBtnKey = GlobalKey();
+  final _fieldEmojiKey = GlobalKey();
+  ui.FlutterView? _view;
+  double _keyboardInset = 0;
+  bool _keyboardClosed = false;
+  double? _pickerAnchorUsed;
+  double? _translateMaxUsed;
+  bool _overlaySyncQueued = false;
+  String _translateQuery = '';
+  bool _translating = false;
+
+  final _toolbarEmojiKey = GlobalKey();
+
+  /// Uploaded bytes by hosted URL, so thumbnails need no re-download.
+  final Map<String, Uint8List> _localMediaPreviews = {};
+
+  /// Uploaded URLs (to is-video), matched by identity since Blossom URLs may lack an extension.
+  final Map<String, bool> _uploadedMedia = {};
+
+  /// This, not the draft text, decides which media the message carries; URLs are appended on send.
+  final List<ComposerAttachment> _attachments = [];
+  int _attachmentSeq = 0;
+
+  /// Only finished uploads contribute, so a half-finished batch never sends a broken link.
+  List<String> get attachmentUrls => [
+        for (final a in _attachments)
+          if (a.isDone && _attachmentContent(a).isNotEmpty) _attachmentContent(a)
+      ];
+
+  bool get hasPendingUploads => _attachments.any((a) =>
+      a.status == ComposerAttachmentStatus.uploading || _attachmentStale(a));
+
+  bool _composerHd = false;
+  bool _composerOnce = false;
+  VoiceRecordingController? _voice;
+  ChatView? _voiceTarget;
+  String _voiceRoute = 'online';
+  final Map<ComposerAttachment, (NostrController, int?)> _uploadActivities = {};
+  (NostrController, int?)? _voiceActivity;
+  (NostrController, int?)? _videoActivity;
+
+  (NostrController, int?) _beginActivity(String kind, ChatView view) {
+    final ctl = ref.read(nostrControllerProvider);
+    return (ctl, ctl.beginChatActivity(kind, view));
+  }
+
+  void _endActivity((NostrController, int?)? a) {
+    if (a == null) return;
+    a.$1.endChatActivity(a.$2);
+  }
+
+  void _endUploadActivity(ComposerAttachment a) =>
+      _endActivity(_uploadActivities.remove(a));
+
+  void _endAllUploadActivities() {
+    for (final a in _uploadActivities.keys.toList()) {
+      _endUploadActivity(a);
+    }
+  }
+
+  String _currentMediaRoute(ChatView view) {
+    final online = ref.read(appStateProvider).connectedRelays > 0 ||
+        ref.read(nostrControllerProvider).isLive;
+    return mediaRouteFor(
+        ref.read(meshControllerProvider.notifier).bridge, online, view);
+  }
+
+  MediaFeatureState _mediaFeature(String feature) {
+    final view = ref.read(appStateProvider).view;
+    return mediaFeatureWith(feature, view, _currentMediaRoute(view));
+  }
+
+  bool get _wantOnce =>
+      _composerOnce && _mediaFeature('once').level != MediaFeatureLevel.off;
+
+  String _attachmentContent(ComposerAttachment a) {
+    final v = a.uploadedAs;
+    if (v == null || !v.once) return a.url;
+    final kind = a.isVideo ? 'video' : 'photo';
+    final full = attachDescriptor(
+        a.url,
+        MediaNote(
+          kind: kind,
+          mime: v.mime,
+          size: v.size,
+          once: true,
+          onceId: v.onceId,
+          key: v.key,
+          nonce: v.nonce,
+        ));
+    return full.isEmpty ? '' : onceContent(kind, full);
+  }
+
+  bool _attachmentStale(ComposerAttachment a) {
+    final v = a.uploadedAs;
+    if (a.status != ComposerAttachmentStatus.done || v == null) return false;
+    final hdMatters = !a.isVideo && a.compressed != null;
+    return v.once != _wantOnce || (hdMatters && v.hd != _composerHd);
+  }
+
+  void _reuploadStale() {
+    for (final a in List.of(_attachments)) {
+      if (_attachmentStale(a)) _retryAttachment(a);
+    }
+  }
+
+  void _toggleComposerHd() {
+    setState(() => _composerHd = !_composerHd);
+    _reuploadStale();
+  }
+
+  void _toggleComposerOnce() {
+    final st = _mediaFeature('once');
+    if (st.level == MediaFeatureLevel.off) {
+      _onSystemMessage(tr(st.reason));
+      return;
+    }
+    setState(() => _composerOnce = !_composerOnce);
+    _reuploadStale();
+  }
+
+  Future<bool> _startVoice() async {
+    if (_voice != null) return true;
+    final st = _mediaFeature('voice');
+    if (st.level == MediaFeatureLevel.off) {
+      _onSystemMessage(tr(st.reason));
+      return false;
+    }
+    final view = ref.read(appStateProvider).view;
+    final rec = VoiceRecordingController(
+      backend: ref.read(voiceRecorderBackendProvider)(),
+      tempPath: ref.read(voiceTempPathProvider),
+      maxSeconds: st.maxSeconds ?? MediaNoteLimits.voiceMaxSeconds,
+      warnReason: st.level == MediaFeatureLevel.warn ? st.reason : '',
+    );
+    setState(() {
+      _voice = rec;
+      _voiceTarget = view;
+      _voiceRoute = _currentMediaRoute(view);
+    });
+    final r = await rec.start();
+    if (r == VoiceStartResult.cancelled) return false;
+    if (r != VoiceStartResult.started) {
+      if (mounted && _voice == rec) setState(() => _voice = null);
+      rec.dispose();
+      _onSystemMessage(r == VoiceStartResult.denied
+          ? tr("Microphone access was denied, so voice messages can't be recorded.")
+          : tr(MediaNoteReasons.voiceNoMic));
+      return false;
+    }
+    if (mounted && _voice == rec && _voiceRoute != 'mesh') {
+      _endActivity(_voiceActivity);
+      _voiceActivity = _beginActivity('recording-voice', view);
+    }
+    return true;
+  }
+
+  void _lockVoice() => _voice?.lock();
+
+  Future<void> _stopVoice(bool send) async {
+    final rec = _voice;
+    if (rec == null) {
+      if (send) {
+        debugPrint('[voice] send pressed with no active recording');
+        showToast(voiceStopFailureText(noRecording: true),
+            kind: ToastKind.error);
+      }
+      return;
+    }
+    _endActivity(_voiceActivity);
+    _voiceActivity = null;
+    final target = _voiceTarget ?? ref.read(appStateProvider).view;
+    final route = _voiceRoute;
+    RecordedVoice? recorded;
+    Object? stopError;
+    try {
+      recorded = await rec.stop(send: send);
+    } catch (e) {
+      stopError = e;
+    }
+    if (mounted && _voice == rec) setState(() => _voice = null);
+    rec.dispose();
+    if (!send) return;
+    if (stopError != null || recorded == null) {
+      debugPrint('[voice] recording failed: $stopError');
+      showToast(voiceStopFailureText(error: stopError), kind: ToastKind.error);
+      return;
+    }
+    await ref.read(mediaNoteSenderProvider).sendRecording(
+          path: recorded.path,
+          kind: 'voice',
+          mime: recorded.mime,
+          duration: recorded.duration,
+          samples: recorded.samples,
+          target: target,
+          route: route,
+          once: recorded.once,
+        );
+  }
+
+  Future<void> _openVideoNote() async {
+    final st = _mediaFeature('round');
+    if (st.level == MediaFeatureLevel.off) {
+      _onSystemMessage(tr(st.reason));
+      return;
+    }
+    final view = ref.read(appStateProvider).view;
+    final route = _currentMediaRoute(view);
+    final onceAllowed = _mediaFeature('once').level != MediaFeatureLevel.off;
+    final note = await showVideoNoteRecorder(context,
+        onceAllowed: onceAllowed,
+        maxSeconds: st.maxSeconds ?? MediaNoteLimits.roundMaxSeconds,
+        onRecording: (on) {
+      _endActivity(_videoActivity);
+      _videoActivity = null;
+      if (on && mounted && route != 'mesh') {
+        _videoActivity = _beginActivity('recording-video', view);
+      }
+    });
+    _endActivity(_videoActivity);
+    _videoActivity = null;
+    if (note == null || !mounted) return;
+    await ref.read(mediaNoteSenderProvider).sendRecording(
+          path: note.path,
+          kind: 'round',
+          mime: note.mime,
+          duration: note.duration,
+          target: view,
+          route: route,
+          once: note.once,
+        );
+  }
+
+  List<String> _translateFavorites = const [];
+
+  /// Snapshotted on open; toggling a star mid-open doesn't reorder until reopen, as in the PWA.
+  List<MapEntry<String, String>> _translateLangOrder = const [];
+
+  /// Whether the draft exceeds ~1.5 lines and floats into the `.composer-popout` box.
+  bool _popout = false;
+
+  /// Held so the popout can show a [Scrollbar] for drafts taller than the box.
+  final ScrollController _fieldScroll = ScrollController();
+
+  /// For ~1/s throttling.
+  int _lastMeshTypingMs = 0;
+
+  /// Hosts the floating popout field while the in-flow slot keeps a fixed placeholder so the toolbar stays put.
+  final _popoutPortal = OverlayPortalController();
+
+  /// Keeps the one TextField element alive across the popout switch, so focus and the IME connection survive.
+  final GlobalKey _fieldKey = GlobalKey();
+
+  /// Lets the autocomplete dropdown span the input width, not the screen.
+  final GlobalKey _inputKey = GlobalKey();
+
+  /// Lets the autocomplete dropdown clear the quote/edit chip.
+  final GlobalKey _chipKey = GlobalKey();
+
+  /// Lets the dropdown clear the attachment strip and format toolbar; the column already includes its 8px gap.
+  final GlobalKey _panelsKey = GlobalKey();
+
+  /// Last offset used, so a panel appearing beneath the dropdown can trigger the needed rebuilds.
+  double _acOffsetUsed = 0;
+
+  /// Lets the dropdown clear the popout overhang too.
+  final GlobalKey _popoutFieldKey = GlobalKey();
+
+  final GlobalKey _rootKey = GlobalKey();
+
+  final GlobalKey _popoutBoxKey = GlobalKey();
+
+  bool _overhangQueued = false;
+  final GlobalKey _hintKey = GlobalKey();
+  bool _hintQueued = false;
+  StateController<double?>? _hintTop;
+  double? _hintReported;
+
+  /// Sent history for ↑/↓ recall on an empty input; newest last, capped.
+  final List<String> _sentHistory = [];
+
+  /// `_sentHistory.length` means the live (empty) draft.
+  int _historyIndex = 0;
+
+  // Autocomplete/command palette: one active trigger token at a time.
+  final _acAnchor = LayerLink();
+  final _acPortal = OverlayPortalController();
+
+  /// Ties the field and dropdown so taps elsewhere dismiss it; per-instance so column composers don't cross-dismiss.
+  final Object _acGroupId = Object();
+  TriggerMatch _trigger = const TriggerMatch.none();
+  AutocompleteView? _acView;
+  List<PaletteRow> _paletteRows = const [];
+  List<BotPaletteCommand> _botRows = const [];
+  int _selectedIndex = 0;
+
+  bool get _paletteActive => _trigger.kind == TriggerKind.command;
+  bool get _botPaletteActive => _trigger.kind == TriggerKind.botCommand;
+  bool get _acActive => _acView != null && !_acView!.isEmpty;
+  bool get _overlayActive => _paletteActive
+      ? _paletteRows.isNotEmpty
+      : (_botPaletteActive ? _botRows.isNotEmpty : _acActive);
+  bool get _composerDocked =>
+      _overlayActive ||
+      _pendingEdit != null ||
+      _pendingQuote != null ||
+      _toolbarWanted(context) ||
+      _attachments.isNotEmpty ||
+      composerMediaMatches(_controller.text, knownMedia: _uploadedMedia)
+          .isNotEmpty;
+
+  @override
+  void dispose() {
+    final hintTop = _hintTop;
+    final reported = _hintReported;
+    if (hintTop != null && reported != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (hintTop.mounted && hintTop.state == reported) {
+          hintTop.state = null;
+        }
+      });
+    }
+    // Stash the unsent input before unmounting; the PWA's single input never unmounts.
+    _saveCurrentDraft();
+    final voice = _voice;
+    _voice = null;
+    if (voice != null) {
+      unawaited(voice.stop(send: false).whenComplete(voice.dispose));
+    }
+    _endAllUploadActivities();
+    _endActivity(_voiceActivity);
+    _voiceActivity = null;
+    _endActivity(_videoActivity);
+    _videoActivity = null;
+    WidgetsBinding.instance.removeObserver(this);
+    _focus.removeListener(_onFocusChanged);
+    if (identical(ComposerShortcutHooks.text, _controller)) {
+      ComposerShortcutHooks.text = null;
+    }
+    if (identical(ComposerShortcutHooks.focus, _focus)) {
+      ComposerShortcutHooks.focus = null;
+    }
+    _escapeLayers.forEach(EscapeLayers.remove);
+    EscapeLayers.unwatchText(_focus);
+    _controller.dispose();
+    _focus.dispose();
+    _sendMenuFocus.dispose();
+    _fieldScroll.dispose();
+    _translateSearchController.dispose();
+    _translateSearchFocus.dispose();
+    super.dispose();
+  }
+
+  /// Mentions splice at the caret; quotes set the deferred chip rather than inserting markdown.
+  void _applyComposerAction(ComposerAction action) {
+    switch (action) {
+      case MentionAction(:final fullNym):
+        final existing = _controller.text;
+        final needsSpace = existing.isNotEmpty && !existing.endsWith(' ');
+        final lead = needsSpace ? ' ' : '';
+        // Resolve to a pubkey so the mention carries the avatar/flair chip; unresolved stays literal.
+        final target = resolveTarget(fullNym, ref.read(usersProvider));
+        final ch = target == null
+            ? null
+            : _controller.mentionSentinel(
+                fullNym: fullNym, pubkey: target.pubkey);
+        final insert = ch != null ? '$lead$ch ' : '$lead@$fullNym ';
+        _controller.text = existing + insert;
+        _controller.selection =
+            TextSelection.collapsed(offset: _controller.text.length);
+      case QuoteAction(:final fullNym, content: final raw, :final messageId):
+        final content =
+            ref.read(appStateProvider.notifier).shownTextFor(raw, messageId);
+        _pendingQuoteId = messageId;
+        ref.read(nostrControllerProvider).noteQuoteSource(fullNym, messageId);
+        _pendingQuote = (
+          author: fullNym,
+          text: _strippedQuoteText(content),
+          fullText: content.contains('#nym:') ? previewText(content) : content,
+        );
+      case InsertTextAction(:final text):
+        final existing = _controller.text;
+        final needsSpace = existing.isNotEmpty && !existing.endsWith(' ')
+            ? (existing.endsWith('\n') ? '' : '\n')
+            : '';
+        _controller.text = existing + needsSpace + text;
+        _controller.selection =
+            TextSelection.collapsed(offset: _controller.text.length);
+      case ReplaceTextAction(:final text):
+        _controller.value = TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: text.length),
+        );
+      case ShareFilesAction(:final paths):
+        final files = [for (final p in paths) XFile(p)];
+        if (files.isNotEmpty) {
+          // Fire-and-forget; the upload path manages its own progress state.
+          unawaited(_pickAndUploadImage(preselected: files));
+        }
+      case SendAsRetryAction(:final placeholder):
+        unawaited(_retrySendAs(placeholder));
+        return;
+      case SendAsPutBackAction(:final placeholder):
+        _putBackSendAs(placeholder);
+    }
+    _focus.requestFocus();
+    setState(() {});
+  }
+
+  /// Keeps only top-level quote lines, collapses blank runs and trims.
+  static String _strippedQuoteText(String text) {
+    final kept = <String>[];
+    for (final line in text.split('\n')) {
+      var depth = 0;
+      var tmp = line;
+      while (tmp.startsWith('>')) {
+        depth++;
+        tmp = tmp.substring(1).trimLeft();
+      }
+      if (depth < 1) kept.add(line);
+    }
+    final joined =
+        kept.join('\n').replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
+    return joined.contains('#nym:') ? previewText(joined) : joined;
+  }
+
+  /// Elides the game-state token first so a quote chip never shows a raw `[gc:…]` blob; capped at 120.
+  static String _quotePreviewText(String text) {
+    final clean = NymFormat.stripForPreview(NymFormat.stripGameTokens(text))
+        .replaceAll(RegExp(r'<[^>]*>'), '')
+        .replaceAll(RegExp(r'[*_~`>#]'), '');
+    return clean.length > 120 ? '${clean.substring(0, 120)}...' : clean;
+  }
+
+  void _clearQuote() {
+    if (_pendingQuote == null) return;
+    setState(() => _pendingQuote = null);
+  }
+
+  /// Seeds the input with the original content, drops a pending quote, and shows the edit chip.
+  void _applyEdit(PendingEdit edit) {
+    final seed = ref
+        .read(appStateProvider.notifier)
+        .editSeed(edit.content, edit.messageId);
+    final shown = PendingEdit(
+        messageId: edit.messageId, content: seed.shown, head: seed.head);
+    setState(() {
+      _pendingEdit = shown;
+      _pendingQuote = null;
+    });
+    _controller.text = shown.content;
+    _controller.selection =
+        TextSelection.collapsed(offset: _controller.text.length);
+    _focus.requestFocus();
+    _onInputChanged();
+  }
+
+  void _cancelEdit() {
+    if (_pendingEdit == null) return;
+    setState(() => _pendingEdit = null);
+    _controller.clear();
+    _onInputChanged();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // Seed the draft key so the first switch away saves the unsent input.
+    _activeDraftKey = ComposerDrafts.keyFor(ref.read(currentViewProvider),
+        owner: _draftOwner);
+    // Rebuild on focus change for the focus fill and ring.
+    _focus.addListener(_onFocusChanged);
+    WidgetsBinding.instance.addObserver(this);
+    ComposerShortcutHooks.focus = _focus;
+    ComposerShortcutHooks.text = _controller;
+    _escapeLayers = [
+      EscapeLayers.add(EscapeRank.picker,
+          () => mounted && _emojiPortal.isShowing, _hideEmojiPicker),
+      EscapeLayers.add(EscapeRank.translate,
+          () => mounted && _translatePortal.isShowing, _hideTranslate),
+    ];
+    EscapeLayers.watchText(_focus,
+        () => _overlayActive || _pendingEdit != null || _pendingQuote != null);
+    // Register hooks so slash commands that open UI surfaces actually fire.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(nostrControllerProvider).setCommandHooks(
+            onSystemMessage: _onSystemMessage,
+            hooks: _buildCommandHooks(),
+          );
+      // A remount (e.g. returning from the bot chat) must restore the stashed draft.
+      _restoreDraftForContext(ref.read(currentViewProvider));
+    });
+  }
+
+  /// UI-layer hooks for slash commands that open surfaces, registered once via [setCommandHooks].
+  CommandHooks _buildCommandHooks() {
+    final controller = ref.read(nostrControllerProvider);
+    return CommandHooks(
+      openPoll: _openPoll,
+      openSearch: (q) => UnifiedSearchPanel.open(context,
+          scope: ref.read(currentViewProvider).storageKey, initialQuery: q),
+      openPm: (pubkey, nym) => controller.startPM(pubkey, nym: nym),
+      // Fresh LN-address resolve via the controller so an un-ingested profile can still be zapped.
+      openZap: (pubkey, nym) async {
+        _onSystemMessage(tr(kPaymentsDisabled));
+  },
+      createGroup: (members, name) {
+        if (members.isEmpty) {
+          _onSystemMessage(tr('Usage: /group @nym1 @nym2 [group name]'));
+          return;
+        }
+        unawaited(controller.createGroup(name, members));
+      },
+      addMember: _addMemberToCurrentGroup,
+      invite: _addMemberToCurrentGroup,
+      groupInfo: _showGroupInfo,
+      kick: (pubkey) =>
+          _withCurrentGroup((gid) => controller.kickFromGroup(gid, pubkey)),
+      ban: (pubkey) =>
+          _withCurrentGroup((gid) => controller.banFromGroup(gid, pubkey)),
+      unban: _unbanFromCurrentGroup,
+      addMod: (pubkey) =>
+          _withCurrentGroup((gid) => controller.promoteModerator(gid, pubkey)),
+      removeMod: (pubkey) =>
+          _withCurrentGroup((gid) => controller.revokeModerator(gid, pubkey)),
+      addAdmin: (pubkey) =>
+          _withCurrentGroup((gid) => controller.promoteAdmin(gid, pubkey)),
+      removeAdmin: (pubkey) =>
+          _withCurrentGroup((gid) => controller.revokeAdmin(gid, pubkey)),
+      transferOwner: (pubkey) =>
+          _withCurrentGroup((gid) => controller.transferOwner(gid, pubkey)),
+      openDevNsecChallenge: () => unawaited(_runDevNsecChallenge()),
+      openTimestampPicker: () => unawaited(_pickTimestamp()),
+    );
+  }
+
+  /// Prompts for the developer nsec and on a verified match logs the running session into that account.
+  Future<void> _runDevNsecChallenge() async {
+    if (!mounted) return;
+    final result = await DevNsecModal.open(context);
+    if (result == null) {
+      _onSystemMessage(tr('Nickname change canceled.'));
+      return;
+    }
+    try {
+      await ref.read(nostrControllerProvider).loginWithNsec(result.nsec);
+    } catch (_) {
+      // The modal pre-verified the nsec, so a failure here is a login error; show the abort line.
+      if (mounted) _onSystemMessage(tr('Nickname change canceled.'));
+      return;
+    }
+    if (!mounted) return;
+    final nym = ref.read(appStateProvider).selfNym;
+    _onSystemMessage(
+        tr('Identity verified. You are now logged in as {nym}.', {'nym': nym}));
+  }
+
+  void _withCurrentGroup(Future<void> Function(String groupId) action) {
+    final view = ref.read(currentViewProvider);
+    if (view.kind == ViewKind.group) unawaited(action(view.id));
+  }
+
+  void _addMemberToCurrentGroup(String arg) {
+    final view = ref.read(currentViewProvider);
+    if (view.kind != ViewKind.group) {
+      _onSystemMessage(tr('You must be in a group to add members.'));
+      return;
+    }
+    final target = resolveTarget(arg, ref.read(usersProvider));
+    if (target == null) {
+      _onSystemMessage(tr('User {user} not found', {'user': arg.trim()}));
+      return;
+    }
+    unawaited(ref
+        .read(nostrControllerProvider)
+        .addGroupMembers(view.id, [target.pubkey]));
+  }
+
+  /// Owner/mod only; the target must be banned; publishes `group-unban` to every member.
+  void _unbanFromCurrentGroup(String pubkey) {
+    final view = ref.read(currentViewProvider);
+    if (view.kind != ViewKind.group) return;
+    final appState = ref.read(appStateProvider.notifier);
+    final app = ref.read(appStateProvider);
+    final group = appState.groupById(view.id);
+    if (group == null) return;
+    if (!GroupLogic.canModerate(group, app.selfPubkey)) {
+      _onSystemMessage(
+          tr('Only the group owner or a moderator can unban users.'));
+      return;
+    }
+    if (!group.banned.contains(pubkey)) {
+      _onSystemMessage(tr('That user is not banned.'));
+      return;
+    }
+    unawaited(
+        ref.read(nostrControllerProvider).unbanFromGroup(view.id, pubkey));
+    ref.read(nostrControllerProvider).ensureProfiles([pubkey]);
+    final nym = ref.read(usersProvider)[pubkey]?.nym ??
+        'anon#${pubkey.substring(pubkey.length - 4)}';
+    ref.read(appStateProvider.notifier).addSystemMessage(
+        tr('@{nym} was unbanned. They can be re-invited.', {'nym': nym}));
+  }
+
+  /// Emits the `.group-info` block: owner, mods, then members, each alphabetized; prefetches unknown profiles.
+  void _showGroupInfo() {
+    final view = ref.read(currentViewProvider);
+    if (view.kind != ViewKind.group) return;
+    final group = ref.read(appStateProvider.notifier).groupById(view.id);
+    if (group == null) return;
+    final app = ref.read(appStateProvider);
+    final users = ref.read(usersProvider);
+    final ownerPk = group.createdBy;
+    final mods = group.mods;
+    String nymOf(String pk) => users[pk]?.nym ?? '';
+    int rank(String pk) => GroupLogic.roleRank(group, pk);
+    final sorted = app.groupInfoMembers(group)..sort((a, b) {
+        final ra = rank(a), rb = rank(b);
+        if (ra != rb) return ra - rb;
+        return nymOf(a).toLowerCase().compareTo(nymOf(b).toLowerCase());
+      });
+    final members = <GroupInfoMember>[
+      for (final pk in sorted)
+        (
+          pubkey: pk,
+          labels: [
+            if (pk == ownerPk)
+              'owner'
+            else if (group.admins.contains(pk))
+              'admin'
+            else if (mods.contains(pk))
+              'mod',
+            if (pk == app.selfPubkey) 'you',
+          ],
+        ),
+    ];
+    ref.read(nostrControllerProvider).ensureProfiles(
+        [for (final pk in sorted) if (app.personMaskLabel(pk).isEmpty) pk]);
+    ref
+        .read(appStateProvider.notifier)
+        .addSystemMessage(encodeGroupInfoSystemMessage((
+          name: app.groupLabel(group),
+          count: sorted.length,
+          members: members,
+        )));
+  }
+
+  void _onFocusChanged() {
+    // Markers follow the caret, and an unfocused field has no caret.
+    _controller.composerFocused = _focus.hasFocus;
+    if (_focus.hasFocus) {
+      ComposerShortcutHooks.focus = _focus;
+      ComposerShortcutHooks.text = _controller;
+    }
+    _keyboardClosed = false;
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeMetrics() {
+    final view = _view;
+    if (!mounted || view == null) return;
+    final kb = view.viewInsets.bottom / view.devicePixelRatio;
+    final closed = kb > 0
+        ? false
+        : _keyboardClosed || (_keyboardInset > 0 && _focus.hasFocus);
+    _keyboardInset = kb;
+    if (closed != _keyboardClosed || _emojiPortal.isShowing ||
+        _translatePortal.isShowing) {
+      setState(() => _keyboardClosed = closed);
+    }
+  }
+
+  bool _toolbarWanted(BuildContext context) {
+    final focused = _focus.hasFocus;
+    return formatToolbarVisible(
+        draft: _pillWanted,
+        focused: focused && !_keyboardClosed,
+        overlay: _emojiPortal.isShowing ||
+            _translatePortal.isShowing ||
+            (_pillWanted &&
+                !focused &&
+                !(ModalRoute.isCurrentOf(context) ?? true)));
+  }
+
+  void _onSystemMessage(String text) => showToast(text);
+
+  Future<SharedPreferences> _ensurePrefs() async {
+    if (_prefs != null) return _prefs!;
+    final prefs = await ref.read(emojiPrefsProvider.future);
+    _prefs = prefs;
+    _recents = EmojiRecentsStore(prefs).load();
+    _translateFavorites = _loadTranslateFavorites(prefs);
+    return prefs;
+  }
+
+  static List<String> _loadTranslateFavorites(SharedPreferences prefs) {
+    final raw = prefs.getString(kTranslateFavoritesKey);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) return decoded.whereType<String>().toList();
+    } catch (_) {}
+    return const [];
+  }
+
+  /// Persists via [_ensurePrefs] so the write never silently no-ops.
+  void _toggleTranslateFavorite(String code) {
+    final next = [..._translateFavorites];
+    if (!next.remove(code)) next.add(code);
+    setState(() => _translateFavorites = next);
+    _ensurePrefs().then(
+        (prefs) => prefs.setString(kTranslateFavoritesKey, jsonEncode(next)));
+  }
+
+  void _insertAtCaret(String insert) {
+    final sel = _controller.selection;
+    final text = _controller.text;
+    final start = sel.isValid ? sel.start : text.length;
+    final end = sel.isValid ? sel.end : text.length;
+    final next = text.replaceRange(start, end, insert);
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: start + insert.length),
+    );
+    // The spliced text can cross the popout threshold; this also re-syncs the popout portal.
+    _onInputChanged();
+    _focus.requestFocus();
+  }
+
+  /// Closes a picker without selection and refocuses the input, except at <=768px so no phone keyboard pops up.
+  void _hidePickerAndRefocus(OverlayPortalController portal) {
+    portal.hide();
+    if (!mounted) return;
+    if (MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint) {
+      return;
+    }
+    _focus.requestFocus();
+  }
+
+  void _hideEmojiPicker() {
+    _hidePickerAndRefocus(_emojiPortal);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _toggleEmojiPicker() async {
+    if (_emojiPortal.isShowing) {
+      _hideEmojiPicker();
+      return;
+    }
+    final prefs = await _ensurePrefs();
+    if (!mounted) return;
+    setState(() {
+      _recents = EmojiRecentsStore(prefs).load();
+      _pickerTab = 'emoji';
+    });
+    _emojiPortal.show();
+  }
+
+  void _switchPickerTab(String tab) {
+    if (tab == _pickerTab) return;
+    setState(() => _pickerTab = tab);
+  }
+
+  Future<void> _onEmojiSelected(String emoji) async {
+    _insertAtCaret(emoji);
+    _emojiPortal.hide();
+    final prefs = await _ensurePrefs();
+    final next = await EmojiRecentsStore(prefs).add(emoji);
+    if (!mounted) return;
+    setState(() => _recents = next);
+  }
+
+  void _onGifSelected(GifItem gif) {
+    _emojiPortal.hide();
+    if (_pendingEdit != null) {
+      _insertAtCaret(gif.url);
+      return;
+    }
+    final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+    final view = ref.read(appStateProvider).view;
+    if (meshBridge != null && meshBridge.shouldSendOverMesh(view)) {
+      unawaited(_sendGifOverMesh(view, gif.url));
+      return;
+    }
+    setState(() => _attachments.add(ComposerAttachment(
+          id: ++_attachmentSeq,
+          isVideo: false,
+          contentType: 'image/gif',
+          status: ComposerAttachmentStatus.done,
+          url: gif.url,
+          label: gif.title,
+          hosted: true,
+        )));
+    _focus.requestFocus();
+  }
+
+  Future<void> _sendGifOverMesh(ChatView view, String url) async {
+    final bytes = await ref.read(giphyServiceProvider).bytes(url);
+    if (bytes == null) {
+      _onSystemMessage(tr('Failed to load GIFs'));
+      return;
+    }
+    final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+    final ok = meshBridge != null &&
+        meshSizeCheck(bytes.length).ok &&
+        await meshBridge.sendFileFromComposer(view, 'gif.gif', 'image/gif', bytes);
+    if (!ok) {
+      _onSystemMessage(tr(MediaNoteReasons.meshTooLarge,
+          {'size': formatBytes(bytes.length)}));
+    }
+  }
+
+  /// Recomputes the trigger and dropdown contents on every input change.
+  void _onInputChanged() {
+    // Collapse completed `:shortcode:`s to sentinel chars before trigger/popout math.
+    _controller.resolveInput();
+    final sel = _controller.selection;
+    final caret = sel.isValid ? sel.start : _controller.text.length;
+    // In the bot PM the `?` palette must survive a space for multi-step subcommands.
+    final botPM = _inBotPM();
+    final trigger = detectTrigger(_controller.text, caret: caret, botPM: botPM);
+    _trigger = trigger;
+    _selectedIndex = 0;
+
+    // Popout when the draft exceeds ~1.5 lines, measured at the real field width.
+    _popout = _draftWantsPopout();
+    _syncPopoutPortal();
+
+    if (trigger.kind == TriggerKind.command) {
+      _paletteRows = buildPaletteRows(trigger.query);
+      _botRows = const [];
+      _acView = null;
+    } else if (trigger.kind == TriggerKind.botCommand) {
+      _botRows = botPM
+          ? [
+              for (final c
+                  in filterBotPMCommands(canonicalizeCommandInput(trigger.query)))
+                BotPaletteCommand(
+                  command: localizeCommandTokensIn(c.name),
+                  desc: c.desc,
+                ),
+            ]
+          : buildLocalizedBotPaletteRows(trigger.query);
+      _paletteRows = const [];
+      _acView = null;
+    } else if (trigger.kind != TriggerKind.none) {
+      _paletteRows = const [];
+      _botRows = const [];
+      _acView = _buildAutocompleteView(trigger);
+    } else {
+      _paletteRows = const [];
+      _botRows = const [];
+      _acView = null;
+    }
+
+    if (_overlayActive) {
+      if (!_acPortal.isShowing) _acPortal.show();
+    } else {
+      if (_acPortal.isShowing) _acPortal.hide();
+    }
+    setState(() {});
+  }
+
+  void _syncPopoutPortal() {
+    if (_popout) {
+      if (!_popoutPortal.isShowing) _popoutPortal.show();
+    } else {
+      if (_popoutPortal.isShowing) _popoutPortal.hide();
+    }
+  }
+
+  /// Pinned to 16px at <=768px, the iOS anti-zoom override.
+  double _inputFontSize() {
+    if (MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint) {
+      return 16;
+    }
+    return ref.read(settingsProvider).textSize.toDouble();
+  }
+
+  /// Lays the draft out at the field's real content width and compares to 1.5 line heights.
+  bool _draftWantsPopout() {
+    final text = _controller.text;
+    if (text.isEmpty) return false;
+    final box = _inputKey.currentContext?.findRenderObject() as RenderBox?;
+    // Not laid out yet: keep the current state.
+    if (box == null || !box.hasSize || box.size.width <= 0) return _popout;
+    final fontSize = _inputFontSize();
+    final contentWidth = box.size.width - 16 - 16 - 2;
+    if (contentWidth <= 0) return _popout;
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: TextStyle(fontSize: fontSize)),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: contentWidth);
+    final expand = painter.height > painter.preferredLineHeight * 1.5;
+    painter.dispose();
+    return expand;
+  }
+
+  /// The `?` palette uses the PM command set only in the verified Nymbot PM.
+  bool _inBotPM() {
+    final view = ref.read(appStateProvider).view;
+    if (view.kind != ViewKind.pm) return false;
+    return ref.read(nostrControllerProvider).isVerifiedBot(view.id);
+  }
+
+  AutocompleteView? _buildAutocompleteView(TriggerMatch trigger) {
+    final state = ref.read(appStateProvider);
+    final view = state.view;
+    final currentKey =
+        view.kind == ViewKind.channel ? view.id.toLowerCase() : '';
+
+    switch (trigger.kind) {
+      case TriggerKind.mention:
+        Set<String>? priority;
+        if (view.kind == ViewKind.pm) {
+          priority = {view.id};
+        } else if (view.kind == ViewKind.group) {
+          final g = state.groups.where((g) => g.id == view.id);
+          if (g.isNotEmpty) {
+            priority =
+                g.first.members.where((p) => p != state.selfPubkey).toSet();
+          }
+        }
+        final results = queryMentions(
+          users: {
+            for (final e in state.users.entries)
+              if (e.key == state.selfPubkey ||
+                  !state.isPersonHidden(e.key, e.value.nym))
+                e.key: e.value
+          },
+          search: trigger.query,
+          currentChannelKey: currentKey,
+          blocked: state.blockedUsers,
+          priority: priority,
+        );
+        final broadcast = [
+          for (final w in gtBroadcastSuggestions(ref, trigger.query))
+            MentionResult(
+              pubkey: '',
+              nym: w,
+              baseNym: w,
+              suffix: '',
+              status: UserStatus.offline,
+              broadcastHint: w == 'here'
+                  ? tr('Notify everyone in this group')
+                  : tr('Notify all members'),
+            ),
+        ];
+        return AutocompleteView.mentions([...broadcast, ...results]);
+      case TriggerKind.channel:
+        return AutocompleteView.channels(
+            channelAutocompleteResults(state, trigger.query, currentKey));
+      case TriggerKind.emoji:
+        final results = queryEmoji(
+          search: trigger.query,
+          recents: ref.read(hiddenEmojiProvider).visible(_recents),
+          custom: _customEmojis,
+        );
+        return AutocompleteView.emoji(results);
+      case TriggerKind.kaomoji:
+        final sections = queryKaomoji(search: trigger.query);
+        return AutocompleteView.kaomoji(sections);
+      default:
+        return null;
+    }
+  }
+
+  void _hideOverlay() {
+    _trigger = const TriggerMatch.none();
+    _acView = null;
+    _paletteRows = const [];
+    _botRows = const [];
+    if (_acPortal.isShowing) _acPortal.hide();
+    setState(() {});
+  }
+
+  /// Replaces the trigger token up to the caret and moves the caret after the insert.
+  void _replaceTriggerToken(String insert) {
+    final sel = _controller.selection;
+    final caret = sel.isValid ? sel.start : _controller.text.length;
+    final start = _trigger.triggerIndex;
+    if (start < 0) return;
+    final text = _controller.text;
+    final next = text.replaceRange(start, caret, insert);
+    final offset = start + insert.length;
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: offset),
+    );
+    _hideOverlay();
+    _focus.requestFocus();
+    // The inserted trailing space closes the token.
+    _onInputChanged();
+  }
+
+  /// Inserts a mention as one sentinel chip that expands to `@base#suffix` on the wire.
+  void _selectMention(MentionResult m) {
+    if (m.isBroadcast) {
+      _replaceTriggerToken(m.insertText);
+      return;
+    }
+    final fullNym = '${m.baseNym}#${m.suffix}';
+    final ch = _controller.mentionSentinel(fullNym: fullNym, pubkey: m.pubkey);
+    _replaceTriggerToken(ch != null ? '$ch ' : m.insertText);
+  }
+
+  void _completeCommand(CommandSpec spec) {
+    // Inserted in the user's language; the dispatcher resolves it back.
+    final name = localizedCommandToken(spec.name);
+    _controller.value = TextEditingValue(
+      text: '$name ',
+      selection: TextSelection.collapsed(offset: name.length + 1),
+    );
+    _hideOverlay();
+    _focus.requestFocus();
+  }
+
+  void _completeBotCommand(BotPaletteCommand cmd) {
+    // Re-evaluate so a multi-step `?command` cascades into its subcommands.
+    _controller.value = TextEditingValue(
+      text: '${cmd.command} ',
+      selection: TextSelection.collapsed(offset: cmd.command.length + 1),
+    );
+    _focus.requestFocus();
+    if (_inBotPM()) {
+      _onInputChanged();
+    } else {
+      _hideOverlay();
+    }
+  }
+
+  int get _navItemCount {
+    if (_paletteActive) return paletteCommands(_paletteRows).length;
+    if (_botPaletteActive) return _botRows.length;
+    return _acView?.itemCount ?? 0;
+  }
+
+  void _confirmSelection() {
+    if (_paletteActive) {
+      final cmds = paletteCommands(_paletteRows);
+      if (_selectedIndex >= 0 && _selectedIndex < cmds.length) {
+        _completeCommand(cmds[_selectedIndex]);
+      }
+      return;
+    }
+    if (_botPaletteActive) {
+      if (_selectedIndex >= 0 && _selectedIndex < _botRows.length) {
+        _completeBotCommand(_botRows[_selectedIndex]);
+      }
+      return;
+    }
+    final v = _acView;
+    if (v == null) return;
+    switch (v.kind) {
+      case AutocompleteKind.mention:
+        if (_selectedIndex < v.mentions.length) {
+          _selectMention(v.mentions[_selectedIndex]);
+        }
+      case AutocompleteKind.channel:
+        if (_selectedIndex < v.channels.length) {
+          _replaceTriggerToken(v.channels[_selectedIndex].insertText);
+        }
+      case AutocompleteKind.emoji:
+        if (_selectedIndex < v.emoji.length) {
+          _onEmojiAutocompletePicked(v.emoji[_selectedIndex]);
+        }
+      case AutocompleteKind.kaomoji:
+        final items = v.kaomojiItems;
+        if (_selectedIndex < items.length) {
+          _replaceTriggerToken(kaomojiInsertText(items[_selectedIndex]));
+        }
+    }
+  }
+
+  void _onEmojiAutocompletePicked(EmojiResult e) {
+    _replaceTriggerToken(e.insertText);
+    unawaitedRecents(e.emoji);
+  }
+
+  void unawaitedRecents(String emoji) async {
+    final prefs = await _ensurePrefs();
+    final next = await EmojiRecentsStore(prefs).add(emoji);
+    if (!mounted) return;
+    setState(() => _recents = next);
+  }
+
+  /// Esc also cancels a pending edit/quote chip when no dropdown is open.
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    if (_handleFormatShortcut(event)) return KeyEventResult.handled;
+    if (!_overlayActive) {
+      // Enter sends; Shift+Enter, or Enter in the popout editor, inserts a newline.
+      final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
+          event.logicalKey == LogicalKeyboardKey.numpadEnter;
+      if (isEnter && !_popout && !HardwareKeyboard.instance.isShiftPressed) {
+        _send();
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.escape) {
+        if (_pendingEdit != null) {
+          _cancelEdit();
+          return KeyEventResult.handled;
+        }
+        if (_pendingQuote != null) {
+          _clearQuote();
+          return KeyEventResult.handled;
+        }
+      }
+      // Only on an empty input (and not mid-edit), so arrows still move the caret in a draft.
+      if (_pendingEdit == null && _controller.text.isEmpty) {
+        if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+          if (!_editLastOwnMessage()) _navigateHistory(-1);
+          return KeyEventResult.handled;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+          _navigateHistory(1);
+          return KeyEventResult.handled;
+        }
+      }
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    final count = _navItemCount;
+    if (key == LogicalKeyboardKey.arrowDown) {
+      setState(() => _selectedIndex = wrapIndex(_selectedIndex, 1, count));
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      setState(() => _selectedIndex = wrapIndex(_selectedIndex, -1, count));
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.tab) {
+      _confirmSelection();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.escape) {
+      _hideOverlay();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  /// Wire-safety: every draft read headed for the wire must expand sentinel chars back to `:shortcode:`.
+  String _draftText() => _controller.expand(_controller.text);
+
+  Future<bool> _consentFor(String content,
+      ({String author, String text, String fullText})? quote) async {
+    final controller = ref.read(nostrControllerProvider);
+    if (!controller.needsAiConsent(content)) return true;
+    if (await AiConsent.instance.ensure()) return true;
+    if (mounted) {
+      _pendingQuote = quote;
+      setState(() {});
+      _onSystemMessage(AiConsentStrings.offNotice);
+    }
+    return false;
+  }
+
+  Future<void> _send() async {
+    final typed = _draftText();
+    final controller = ref.read(nostrControllerProvider);
+
+    // Edit mode routes the send to editMessage; an empty input cancels.
+    final edit = _pendingEdit;
+    if (edit != null) {
+      final trimmed = typed.trim();
+      setState(() => _pendingEdit = null);
+      _controller.clear();
+      _hideOverlay();
+      _focus.requestFocus();
+      if (trimmed.isEmpty || trimmed == edit.content.trim()) return;
+      controller.editMessage(edit.messageId, edit.head + trimmed);
+      Haptics.light();
+      return;
+    }
+
+    // Sending mid-upload would silently drop that attachment.
+    if (hasPendingUploads) {
+      _onSystemMessage(
+          tr('Still uploading — send again once the attachments finish.'));
+      return;
+    }
+
+    // Attachment URLs are appended here; failed tiles contribute nothing.
+    final urls = attachmentUrls;
+
+    // The PWA allows sending a bare quote.
+    if (typed.trim().isEmpty && urls.isEmpty && _pendingQuote == null) return;
+    final blocked = controller.groupSendBlockReason(typed);
+    if (blocked != null) {
+      _onSystemMessage(blocked);
+      return;
+    }
+
+    var composed = typed;
+    if (urls.isNotEmpty) {
+      final needsSpace = composed.isNotEmpty && !composed.endsWith(' ');
+      composed = '$composed${needsSpace ? ' ' : ''}${urls.join(' ')}';
+    }
+    final quote = _pendingQuote;
+    final content = _composeOutgoing(composed);
+    if (!await _consentFor(content, quote)) return;
+    if (!mounted) return;
+
+    // `?`/@Nymbot interception and `/` commands are handled inside sendCurrent.
+    controller.sendCurrent(content);
+    Haptics.light();
+    // Recall history records the final content, quote prepend included.
+    _pushSentHistory(content);
+    _controller.clear();
+    _endAllUploadActivities();
+    _attachments.clear();
+    _popout = false;
+    _syncPopoutPortal();
+    _hideOverlay();
+    setState(() {});
+    _focus.requestFocus();
+  }
+
+  /// Skips consecutive duplicates, caps at 50, and resets the recall cursor.
+  void _pushSentHistory(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isNotEmpty &&
+        (_sentHistory.isEmpty || _sentHistory.last != text)) {
+      _sentHistory.add(text);
+      if (_sentHistory.length > 50) _sentHistory.removeAt(0);
+    }
+    _historyIndex = _sentHistory.length;
+  }
+
+  /// -1 is older, +1 newer; at `length` the input is the empty live draft.
+  bool _editLastOwnMessage() {
+    final app = ref.read(appStateProvider);
+    final list = app.messages[ref.read(currentViewProvider).storageKey];
+    if (list == null) return false;
+    for (var i = list.length - 1; i >= 0; i--) {
+      final m = list[i];
+      if (!m.isOwn || m.isSystemRow || m.isMeAction) continue;
+      if (m.id.isEmpty || m.content.isEmpty || m.id.startsWith('_optim_')) {
+        return false;
+      }
+      ref
+          .read(pendingEditProvider.notifier)
+          .request(messageId: m.id, content: m.content);
+      return true;
+    }
+    return false;
+  }
+
+  void _navigateHistory(int delta) {
+    if (_sentHistory.isEmpty) return;
+    final next = (_historyIndex + delta).clamp(0, _sentHistory.length);
+    if (next == _historyIndex) return;
+    _historyIndex = next;
+    final text = next >= _sentHistory.length ? '' : _sentHistory[next];
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _onInputChanged();
+  }
+
+  /// Prepends the pending quote only at send: `> @author: line`, then `> line`s and a blank line.
+  String _composeOutgoing(String typed) {
+    var content = typed;
+    final quote = _pendingQuote;
+    if (quote != null) {
+      final lines = quote.text.split('\n');
+      final quoteRest = lines.length > 1
+          ? '\n${lines.skip(1).map((l) => '> $l').join('\n')}'
+          : '';
+      final quoteLine = '> @${quote.author}: ${lines.first}$quoteRest';
+      content = content.isNotEmpty ? '$quoteLine\n\n$content' : quoteLine;
+      _pendingQuote = null;
+    }
+    return content;
+  }
+
+  Future<void> _sendAnon() async {
+    if (!_anonEligible) return;
+    final typed = _draftText();
+    if (hasPendingUploads) {
+      _onSystemMessage(
+          tr('Still uploading — send again once the attachments finish.'));
+      return;
+    }
+    final urls = attachmentUrls;
+    if (typed.trim().isEmpty && urls.isEmpty && _pendingQuote == null) return;
+    final controller = ref.read(nostrControllerProvider);
+    var composed = typed;
+    if (urls.isNotEmpty) {
+      final needsSpace = composed.isNotEmpty && !composed.endsWith(' ');
+      composed = '$composed${needsSpace ? ' ' : ''}${urls.join(' ')}';
+    }
+    final quote = _pendingQuote;
+    final content = _composeOutgoing(composed);
+    if (!await _consentFor(content, quote)) return;
+    if (!mounted) return;
+    unawaited(controller.sendCurrentPseudonymous(content).then((sent) {
+      if (!sent) return;
+      Haptics.light();
+      showToast(tr(ComposerStrings.sentAnon));
+    }));
+    _pushSentHistory(content);
+    _controller.clear();
+    _endAllUploadActivities();
+    _attachments.clear();
+    _popout = false;
+    _syncPopoutPortal();
+    _hideOverlay();
+    setState(() {});
+    _focus.requestFocus();
+  }
+
+  void _openSendLater() {
+    if (_pendingEdit != null) return;
+    if (hasPendingUploads) {
+      _onSystemMessage(
+          tr('Still uploading — send again once the attachments finish.'));
+      return;
+    }
+    final urls = attachmentUrls;
+    var composed = _draftText();
+    if (urls.isNotEmpty) {
+      final needsSpace = composed.isNotEmpty && !composed.endsWith(' ');
+      composed = '$composed${needsSpace ? ' ' : ''}${urls.join(' ')}';
+    }
+    final quote = _pendingQuote;
+    final content = _composeOutgoing(composed);
+    _pendingQuote = quote;
+    final view = _chatView();
+    final thread = ref.read(activeThreadProvider);
+    final threadRoot =
+        thread != null && thread.view == view ? thread.rootId : null;
+    unawaited(SendLaterSheet.open(
+      context,
+      storageKey: view.storageKey,
+      draft: content,
+      threadRoot: threadRoot,
+      onScheduled: () {
+        if (!mounted) return;
+        _pushSentHistory(content);
+        _controller.clear();
+        _endAllUploadActivities();
+        _attachments.clear();
+        _pendingQuote = null;
+        _popout = false;
+        _syncPopoutPortal();
+        _hideOverlay();
+        setState(() {});
+      },
+    ));
+  }
+
+  bool get _anonEligible {
+    final view = _chatView();
+    final mesh =
+        ref.read(meshControllerProvider.notifier).bridge?.shouldSendOverMesh(view) ??
+            false;
+    return canSendAnon(
+      loggedIn: ref.read(nostrControllerProvider).identity?.loginMethod != null,
+      surface: mediaSurface(view),
+      editing: _pendingEdit != null,
+      mesh: view.kind == ViewKind.channel && mesh,
+    );
+  }
+
+  /// The underlying upload isn't cancellable, so a cancelled result is discarded when it resolves.
+  bool _uploadCancelled = false;
+
+  void _removeAttachment2(ComposerAttachment a) {
+    _endUploadActivity(a);
+    setState(() => _attachments.remove(a));
+  }
+
+  void clearAttachments() {
+    _endAllUploadActivities();
+    if (_attachments.isEmpty) return;
+    setState(() => _attachments.clear());
+  }
+
+  Future<({Uint8List bytes, String type, ComposerUploadVariant variant})>
+      _prepareUpload(ComposerAttachment a, Uint8List original) async {
+    a.originalSize = original.length;
+    if (!a.isVideo && !a.compressionTried) {
+      a.compressionTried = true;
+      a.compressed = await compressPhoto(original, a.contentType);
+    }
+    a.compressedSize = a.compressed?.length ?? original.length;
+    final hd = _composerHd;
+    final useCompressed = !a.isVideo && !hd && a.compressed != null;
+    final body = useCompressed ? a.compressed! : original;
+    final mime = useCompressed ? 'image/jpeg' : baseMime(a.contentType);
+    if (!_wantOnce) {
+      return (
+        bytes: body,
+        type: useCompressed ? 'image/jpeg' : a.contentType,
+        variant: ComposerUploadVariant(hd: hd, once: false),
+      );
+    }
+    final secret = newOnceSecret();
+    final ct = await encryptOnce(body, secret.key, secret.nonce);
+    return (
+      bytes: ct,
+      type: 'application/octet-stream',
+      variant: ComposerUploadVariant(
+        hd: hd,
+        once: true,
+        onceId: secret.onceId,
+        key: secret.key,
+        nonce: secret.nonce,
+        mime: mime,
+        size: body.length,
+      ),
+    );
+  }
+
+  /// Never throws: a failure marks only that tile retryable.
+  Future<void> _uploadAttachment(ComposerAttachment a) async {
+    final bytes = a.bytes;
+    if (bytes == null || bytes.isEmpty) return;
+    if (mounted) {
+      setState(() {
+        a.status = ComposerAttachmentStatus.uploading;
+        a.error = '';
+      });
+    }
+    if (mounted) {
+      _endUploadActivity(a);
+      _uploadActivities[a] =
+          _beginActivity(UploadActivity.kindForMime(a.contentType), _chatView());
+    }
+    String? url;
+    ComposerUploadVariant? variant;
+    try {
+      final prepared = await _prepareUpload(a, bytes);
+      variant = prepared.variant;
+      if (mounted) setState(() {});
+      url = await ref
+          .read(nostrControllerProvider)
+          .uploadImage(prepared.bytes, contentType: prepared.type);
+    } catch (e) {
+      url = null;
+      a.error = e.toString();
+    } finally {
+      _endUploadActivity(a);
+    }
+    if (!mounted) return;
+    if (_uploadCancelled) return;
+    setState(() {
+      if (url == null || url.isEmpty) {
+        a.status = ComposerAttachmentStatus.failed;
+        if (a.error.isEmpty) a.error = tr('Failed to upload media.');
+        if (a.error.length > 120) a.error = a.error.substring(0, 120);
+      } else {
+        a.status = ComposerAttachmentStatus.done;
+        a.url = url;
+        a.error = '';
+        a.uploadedAs = variant;
+        // Reuse the uploaded bytes so the thumbnail doesn't flicker or re-fetch.
+        if (!a.isVideo) _localMediaPreviews[url] = bytes;
+        _uploadedMedia[url] = a.isVideo;
+      }
+    });
+    if (_attachmentStale(a)) _retryAttachment(a);
+  }
+
+  Future<void> _retryAttachment(ComposerAttachment a) async {
+    if (a.status == ComposerAttachmentStatus.uploading) return;
+    _uploadCancelled = false;
+    await _uploadAttachment(a);
+  }
+
+  static const _maxUploadBytes = 50 * 1024 * 1024;
+
+  void _pasteImage(PastedImage image) {
+    if (!mounted) return;
+    final item = _attachModel().where((i) => i.id == 'photo').firstOrNull;
+    if (item == null) return;
+    if (!item.enabled) {
+      if (item.detail.isNotEmpty) _onSystemMessage(tr(item.detail));
+      return;
+    }
+    if (hasPendingUploads) return;
+    if (!_canUpload && _currentMediaRoute(_chatView()) != 'mesh') {
+      _onSystemMessage(tr(MediaNoteReasons.hdOffline));
+      return;
+    }
+    unawaited(_pickAndUploadImage(preselected: [image.file]));
+  }
+
+  /// Picks one or more media and uploads each to Blossom.
+  Future<void> _pickAndUploadImage({List<XFile>? preselected}) async {
+    List<XFile> picked;
+    if (preselected != null) {
+      picked = preselected;
+    } else {
+      try {
+        final picker = ImagePicker();
+        picked = await picker.pickMultipleMedia();
+      } catch (_) {
+        return; // Picker unavailable (tests/desktop).
+      }
+    }
+    if (picked.isEmpty) return;
+
+    // Mesh view has no Blossom server, so send the media over the mesh as a file.
+    final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+    final view = ref.read(appStateProvider).view;
+    if (meshBridge != null && meshBridge.shouldSendOverMesh(view)) {
+      for (final f in picked) {
+        Uint8List bytes;
+        try {
+          bytes = await f.readAsBytes();
+        } catch (_) {
+          continue;
+        }
+        if (bytes.isEmpty) continue;
+        final mime = f.mimeType ?? _guessImageMime(f.name);
+        if (!_composerHd && compressibleImageMime(mime)) {
+          final small = await compressPhoto(bytes, mime,
+              maxDimension: MediaNoteLimits.meshPhotoMaxDimension,
+              quality: MediaNoteLimits.meshPhotoQuality);
+          if (small != null) bytes = small;
+        }
+        final sendMime =
+            compressibleImageMime(mime) && !_composerHd ? 'image/jpeg' : mime;
+        final ok = meshSizeCheck(bytes.length).ok &&
+            await meshBridge.sendFileFromComposer(view, f.name, sendMime, bytes);
+        if (!ok) {
+          _onSystemMessage(tr(MediaNoteReasons.meshTooLarge,
+              {'size': formatBytes(bytes.length)}));
+        }
+      }
+      return;
+    }
+    if (!mounted) return;
+    _uploadCancelled = false;
+
+    // Each picked file becomes its own tile with its own progress wheel.
+    final fresh = <ComposerAttachment>[];
+    for (final f in picked) {
+      Uint8List bytes;
+      try {
+        bytes = await f.readAsBytes();
+      } catch (_) {
+        continue;
+      }
+      if (bytes.length > _maxUploadBytes) {
+        _onSystemMessage(tr('Files must be under 50MB.'));
+        continue;
+      }
+      final contentType = f.mimeType ?? _guessImageMime(f.name);
+      final isVideo = contentType.startsWith('video/');
+      fresh.add(ComposerAttachment(
+        id: ++_attachmentSeq,
+        isVideo: isVideo,
+        contentType: contentType,
+        // Kept for retry even though the tile can't draw a video frame.
+        bytes: bytes,
+      ));
+    }
+    if (fresh.isEmpty || !mounted) return;
+    setState(() => _attachments.addAll(fresh));
+
+    for (final a in fresh) {
+      if (!mounted || _uploadCancelled) break;
+      await _uploadAttachment(a);
+    }
+    if (mounted) _focus.requestFocus();
+  }
+
+
+  Future<void> _pickAndShareFile() async {
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.pickFiles(withData: true);
+    } catch (_) {
+      return;
+    }
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    final bytes = file.bytes;
+    if (bytes == null) {
+      _onSystemMessage(tr('Could not read the selected file.'));
+      return;
+    }
+    // Mesh view sends the file directly over the mesh.
+    final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+    final view = ref.read(appStateProvider).view;
+    if (meshBridge != null && meshBridge.shouldSendOverMesh(view)) {
+      final ok = meshSizeCheck(bytes.length).ok &&
+          await meshBridge.sendFileFromComposer(
+              view, file.name, _guessImageMime(file.name), bytes);
+      if (!ok) {
+        _onSystemMessage(tr(MediaNoteReasons.meshTooLarge,
+            {'size': formatBytes(bytes.length)}));
+      }
+      return;
+    }
+    await ref.read(nostrControllerProvider).shareP2PFile(
+          bytes: bytes,
+          name: file.name,
+          type: _guessImageMime(file.name),
+        );
+    if (mounted) _onSystemMessage(tr('File offered for P2P download.'));
+  }
+
+  static String _guessImageMime(String name) {
+    final lower = name.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.mp4')) return 'video/mp4';
+    if (lower.endsWith('.webm')) return 'video/webm';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    return 'application/octet-stream';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final view = _view = View.maybeOf(context);
+    if (view != null) {
+      _keyboardInset = view.viewInsets.bottom / view.devicePixelRatio;
+    }
+    // Send is gated on connection, not input content; empty-input guards live in the send paths.
+    final sendEnabled = ref.watch(
+          appStateProvider.select((s) => s.connectedRelays > 0),
+        ) ||
+        ref.read(nostrControllerProvider).isLive;
+
+    _customEmojis = ref.watch(visibleCustomEmojiProvider);
+    // Lets the controller resolve sentinel chars to emoji images and recognize real `:code:`s.
+    _controller.codeToUrl = _customEmojis.codeToUrl;
+
+    ref.listen(pendingComposerActionProvider, (_, action) {
+      if (action == null) return;
+      _applyComposerAction(action);
+      ref.read(pendingComposerActionProvider.notifier).consume();
+    });
+    ref.listen(pendingEditProvider, (_, edit) {
+      if (edit == null) return;
+      if (!DmPollsService.blocksEdit(_chatView(), edit.content)) {
+        _applyEdit(edit);
+      }
+      ref.read(pendingEditProvider.notifier).consume();
+    });
+    ref.listen(currentViewProvider, (prev, next) {
+      if (prev == next) return;
+      _onViewSwitched(next);
+    });
+
+    // `compact` spans <=1024, so the phone padding keys off the real 768px width.
+    final width = MediaQuery.of(context).size.width;
+    final phone = width <= NymDimens.mobileBreakpoint;
+    final gap = phone ? 6.0 : (width <= NymDimens.tabletBreakpoint ? 8.0 : 10.0);
+    _rowSendEnabled = sendEnabled;
+    _rowPhone = phone;
+    _rowGap = gap;
+    final wantPill = _pillWanted;
+    _queueOverhangSync();
+    _queueRestSync();
+    _queueHintSync();
+    final composer = Container(
+      key: _rootKey,
+      decoration: BoxDecoration(
+        color: c.glassBg,
+        border: Border(top: BorderSide(color: c.glassBorder)),
+      ),
+      padding: phone
+          ? const EdgeInsets.all(10)
+          : const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ScheduledBar(
+                storageKey: ref.watch(
+                    currentViewProvider.select((v) => v.storageKey))),
+            OverlayPortal(
+              controller: _emojiPortal,
+              overlayChildBuilder: _pickerOverlay,
+              child: TweenAnimationBuilder<double>(
+                tween: Tween<double>(end: wantPill ? 1 : 0),
+                duration: MediaQuery.of(context).disableAnimations
+                    ? Duration.zero
+                    : _pillDuration,
+                curve: Curves.easeOut,
+                builder: (context, t, _) {
+                  _pillT = t;
+                  _pillOn = wantPill || t > 0;
+                  final input = _inputWithChips(context, sendEnabled);
+                  const none = SizedBox.shrink();
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      _pillOn ? none : _attachButton(),
+                      _pillOn ? none : SizedBox(width: gap),
+                      Expanded(child: input),
+                      _pillOn ? none : SizedBox(width: gap),
+                      _pillOn ? none : _primaryButton(sendEnabled, phone),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    return Stack(
+      clipBehavior: Clip.none,
+      fit: StackFit.passthrough,
+      children: [
+        composer,
+        _ComposerConnHint(
+            phone: phone, anchor: _hintKey, onBuilt: _queueHintSync),
+      ],
+    );
+  }
+
+  void _queueHintSync() {
+    if (_hintQueued) return;
+    _hintQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _hintQueued = false;
+      if (!mounted) return;
+      final box = _hintKey.currentContext?.findRenderObject();
+      final next = box is RenderBox && box.hasSize && box.attached
+          ? box.localToGlobal(Offset.zero).dy
+          : null;
+      final StateController<double?> hintTop =
+          _hintTop ?? ref.read(composerHintTopProvider.notifier);
+      _hintTop = hintTop;
+      final prev = hintTop.state;
+      if (prev == next ||
+          (prev != null && next != null && (prev - next).abs() < 0.5)) {
+        return;
+      }
+      hintTop.state = next;
+      _hintReported = next;
+      _queueHintSync();
+    });
+  }
+
+  /// The chip slot is always present (collapsing to 0) so toggling never re-parents the TextField.
+  Widget _inputWithChips(BuildContext context, bool inputEnabled) {
+    final block = _popout ? null : _chipBlock();
+    // Panels ride into the overlay with the chip while the field floats, or the toolbar hides behind it.
+    final panels = _popout ? null : _formatPanels(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _pillInset(AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          alignment: Alignment.bottomLeft,
+          child: block ?? const SizedBox(height: 0, width: double.infinity),
+        )),
+        _pillInset(AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          alignment: Alignment.bottomLeft,
+          child: panels ?? const SizedBox(height: 0, width: double.infinity),
+        )),
+        ValueListenableBuilder<String?>(
+          valueListenable: ref.read(mediaNoteSenderProvider).sending,
+          builder: (context, label, _) => label == null
+              ? const SizedBox.shrink()
+              : Padding(
+                  key: const ValueKey('noteSending'),
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    children: [
+                      Text(label,
+                          style: TextStyle(
+                              color: context.nym.textDim, fontSize: 12)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: LinearProgressIndicator(
+                          minHeight: 3,
+                          color: context.nym.primary,
+                          backgroundColor: context.nym.glassBorder,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+        ),
+        const GtSlowmodeBar(),
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            _input(context, inputEnabled),
+            if (_voice != null)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: VoiceRecordBar(
+                  controller: _voice!,
+                  onCancel: () => _stopVoice(false),
+                  onSend: () => _stopVoice(true),
+                  onToggleOnce: () {
+                    final st = _mediaFeature('once');
+                    if (st.level == MediaFeatureLevel.off) {
+                      _onSystemMessage(tr(st.reason));
+                      return;
+                    }
+                    _voice?.toggleOnce();
+                  },
+                  onceAllowed:
+                      _mediaFeature('once').level != MediaFeatureLevel.off,
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget? _chipBlock() {
+    // Top corners square off when a popup is stacked above.
+    final chip = _pendingEdit != null
+        ? _EditPreviewChip(
+            text: _quotePreviewText(_pendingEdit!.content),
+            onClose: _cancelEdit,
+            squareTop: _overlayActive,
+          )
+        : (_pendingQuote != null
+            ? _QuotePreviewChip(
+                author: _pendingQuote!.author,
+                text: _quotePreviewText(_pendingQuote!.text),
+                onClose: _clearQuote,
+                squareTop: _overlayActive,
+              )
+            : null);
+    if (chip == null) return null;
+    return _shifted(_panelLayers + 1, Padding(
+      padding: EdgeInsets.only(bottom: _pillWanted ? 0 : 8),
+      // Keyed on chip kind so a kind change replays the slide-in.
+      child: _ChipSlideIn(
+        key: ValueKey(_pendingEdit != null ? 'edit' : 'quote'),
+        // Measures the chip alone; the 8px gap is added in the offset.
+        child: KeyedSubtree(key: _chipKey, child: chip),
+      ),
+    ));
+  }
+
+  int get _panelLayers {
+    final uploads = _attachments.any((a) => !a.hosted) ? 1 : 0;
+    final strip = (_attachments.isNotEmpty ||
+            composerMediaMatches(_controller.text, knownMedia: _uploadedMedia)
+                .isNotEmpty)
+        ? 1
+        : 0;
+    return uploads + strip + (_pillWanted ? 1 : 0);
+  }
+
+  Widget _pillInset(Widget child) {
+    if (!_pillOn || _pillT >= 1) return child;
+    final keep = 1 - _pillT;
+    final send = _liveBox(_sendSplitKey);
+    final primaryW = (send != null && send.hasSize) ? send.size.width : 42.0;
+    return Padding(
+      padding: EdgeInsets.only(
+        left: (42 + _rowGap) * keep,
+        right: (primaryW + _rowGap) * keep,
+      ),
+      child: child,
+    );
+  }
+
+  double _acOffsetNow() {
+    final overhang = _popout
+        ? math.max(0.0, _boxHeight(_popoutFieldKey) - _composerRowBase)
+        : 0.0;
+    final chipH = _boxHeight(_chipKey);
+    final panelsH = _boxHeight(_panelsKey);
+    if (!_pillWanted) return overhang + panelsH + (chipH > 0 ? chipH + 8 : 0);
+    final layers = (panelsH > 0 ? _panelLayers : 0) + (chipH > 0 ? 1 : 0);
+    return overhang + panelsH + chipH - layers - 8;
+  }
+
+
+  /// In-flow height reserved while the popout floats (single text row plus padding).
+  static const double _composerRowBase = 42;
+
+  static const Duration _pillDuration = Duration(milliseconds: 180);
+
+  bool _rowSendEnabled = false;
+  bool _rowPhone = false;
+  double _rowGap = 10;
+  double _pillT = 0;
+  double _textStart = 37;
+  bool _textStartQueued = false;
+  final _translateGlyphKey = GlobalKey();
+
+  double get _pillFieldLeft =>
+      _pillWanted ? math.min(42 + _rowGap, _textStart) : 42 + _rowGap;
+
+  double get _pillTextPad => _pillWanted
+      ? _textStart - _pillFieldLeft
+      : 16 * (1 - _pillT);
+
+  void _queueTextStartSync() {
+    if (_textStartQueued) return;
+    _textStartQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _textStartQueued = false;
+      if (!mounted || !_pillWanted) return;
+      final glyph = _liveBox(_translateGlyphKey);
+      final plus = _liveBox(_attachKey);
+      if (glyph == null || plus == null || !glyph.hasSize || !plus.hasSize) {
+        return;
+      }
+      final plusX = plus.localToGlobal(Offset.zero).dx;
+      final text = _editableBox();
+      final inset = text == null
+          ? 0.0
+          : text.localToGlobal(Offset.zero).dx -
+              plusX -
+              _pillFieldLeft -
+              _pillTextPad;
+      final x = glyph.localToGlobal(Offset.zero).dx - plusX - inset;
+      if ((x - _textStart).abs() > 0.25) setState(() => _textStart = x);
+    });
+  }
+
+  RenderBox? _editableBox() {
+    RenderBox? found;
+    void visit(RenderObject o) {
+      if (found != null) return;
+      if (o is RenderEditable) {
+        found = o;
+        return;
+      }
+      o.visitChildren(visit);
+    }
+
+    final root = _liveBox(_fieldKey);
+    if (root != null) visit(root);
+    final box = found;
+    return box != null && box.attached && box.hasSize ? box : null;
+  }
+  bool _pillOn = false;
+
+  bool get _pillWanted =>
+      primaryAction(
+        text: _controller.text,
+        attachments: _attachments.length,
+        editing: _pendingEdit != null,
+        quoting: _pendingQuote != null,
+        recording: _voice != null,
+      ) ==
+      'send';
+
+  @visibleForTesting
+  bool get pillOn => _pillOn;
+
+  double _stackShift(int layersBelow) =>
+      _pillWanted ? math.max(0, layersBelow - 1).toDouble() : 0;
+
+  Widget _shifted(int layersBelow, Widget child) {
+    final dy = _stackShift(layersBelow);
+    if (dy == 0) return child;
+    return Transform.translate(offset: Offset(0, dy), child: child);
+  }
+
+  Widget _pillShell(BuildContext context, double topRadius, Widget field) {
+    final c = context.nym;
+    if (_pillWanted) _queueTextStartSync();
+    final t = _pillT;
+    final radius = BorderRadius.vertical(
+      top: Radius.circular(topRadius),
+      bottom: const Radius.circular(NymRadius.md),
+    );
+    final flatFill = c.isLight
+        ? Colors.black.withValues(alpha: 0.04)
+        : Colors.white.withValues(alpha: 0.05);
+    final fill = _popout ? c.bgTertiary : flatFill;
+    final side = c.glassBorder;
+    final box = Container(
+      key: const ValueKey('composerPill'),
+      decoration: BoxDecoration(
+        color: fill.withValues(alpha: fill.a * t),
+        borderRadius: radius,
+      ),
+      foregroundDecoration: BoxDecoration(
+        borderRadius: radius,
+        border: Border.all(color: side.withValues(alpha: side.a * t)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Expanded(
+            child: Stack(
+              alignment: AlignmentDirectional.bottomStart,
+              children: [
+                Padding(
+                  padding: EdgeInsets.only(left: _pillFieldLeft),
+                  child: field,
+                ),
+                UnconstrainedBox(child: _attachButton(bare: t)),
+              ],
+            ),
+          ),
+          SizedBox(width: _rowGap),
+          _primaryButton(_rowSendEnabled, _rowPhone, inset: 4 * t, bare: t),
+        ],
+      ),
+    );
+    return CssFocusRing(
+      show: false,
+      color: c.primaryA(0.06),
+      radius: radius,
+      child: box,
+    );
+  }
+
+  /// When popped out, the field floats in a portal over the messages while the slot keeps the base row height.
+  Widget _input(BuildContext context, bool inputEnabled) {
+    final focus = Focus(
+      onKeyEvent: _onKey,
+      child: TweenAnimationBuilder<double>(
+        tween: Tween<double>(end: _composerDocked ? 0 : NymRadius.md),
+        duration: MediaQuery.of(context).disableAnimations
+            ? Duration.zero
+            : NymMotion.transition,
+        curve: NymMotion.curve,
+        builder: (context, topRadius, _) => _pillOn
+            ? _pillShell(
+                context, topRadius, _textField(context, inputEnabled, topRadius))
+            : _textField(context, inputEnabled, topRadius),
+      ),
+    );
+    // Nested portals paint above the popout; translate must live in the main tree or it never builds in popout.
+    return CompositedTransformTarget(
+      key: _inputKey,
+      link: _acAnchor,
+      child: OverlayPortal(
+        controller: _popoutPortal,
+        overlayChildBuilder: (ctx) => _popoutOverlay(ctx, focus),
+        child: OverlayPortal(
+          controller: _translatePortal,
+          overlayChildBuilder: _translateDropdown,
+          child: OverlayPortal(
+            controller: _acPortal,
+            overlayChildBuilder: _overlayChild,
+            // The [_fieldKey] GlobalKey reparents the same element, so the flip never closes the keyboard.
+            child: _popout
+                ? const SizedBox(
+                    height: _composerRowBase, width: double.infinity)
+                : focus,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Floating popout field capped at `min(40vh,360)`; a pending chip rides above it.
+  Widget _popoutOverlay(BuildContext context, Widget field) {
+    if (!_popout) return const SizedBox.shrink();
+    final chipBlock = _chipBlock();
+    final panels = _formatPanels(context);
+    return CompositedTransformFollower(
+      link: _acAnchor,
+      targetAnchor: Alignment.bottomLeft,
+      followerAnchor: Alignment.bottomLeft,
+      showWhenUnlinked: false,
+      child: Align(
+        alignment: Alignment.bottomLeft,
+        child: Material(
+          type: MaterialType.transparency,
+          child: SizedBox(
+            key: _popoutBoxKey,
+            width: _anchorWidth(context),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ?chipBlock,
+                ?panels,
+                // Wraps only the field so the offset measures its growth past the base row.
+                SizedBox(key: _popoutFieldKey, child: field),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The anchored command palette or autocomplete dropdown above the input.
+  Widget _overlayChild(BuildContext context) {
+    if (!_overlayActive) return const SizedBox.shrink();
+    final body = _paletteActive
+        ? CommandPalette(
+            rows: _paletteRows,
+            selectedIndex: _selectedIndex,
+            onSelect: _completeCommand,
+            docked: true,
+          )
+        : _botPaletteActive
+            ? BotCommandPalette(
+                rows: _botRows,
+                selectedIndex: _selectedIndex,
+                onSelect: _completeBotCommand,
+                docked: true,
+              )
+            : AutocompleteDropdown(
+                view: _acView!,
+                selectedIndex: _selectedIndex,
+                custom: _customEmojis,
+                badgesFor: _mentionBadges,
+                cosmeticsFor: (pk) => resolveCosmetics(ref, pk),
+                onSelectMention: _selectMention,
+                onSelectChannel: (ch) => _replaceTriggerToken(ch.insertText),
+                onSelectEmoji: _onEmojiAutocompletePicked,
+                onSelectKaomoji: (k) =>
+                    _replaceTriggerToken(kaomojiInsertText(k)),
+                docked: true,
+              );
+    // Lift the dropdown by the popout overhang and chip height, or it paints under the field or over the chip.
+    final acOffset = _acOffsetNow();
+    _acOffsetUsed = acOffset;
+    _settleOverlayOffset();
+    return CompositedTransformFollower(
+      link: _acAnchor,
+      targetAnchor: Alignment.topLeft,
+      followerAnchor: Alignment.bottomLeft,
+      // Negative Y lifts the follower above the anchor.
+      offset: Offset(0, -acOffset),
+      showWhenUnlinked: false,
+      child: Align(
+        alignment: Alignment.bottomLeft,
+        child: Material(
+          type: MaterialType.transparency,
+          // Same group as the field, so tapping a row isn't an outside tap that dismisses first.
+          child: TapRegion(
+            groupId: _acGroupId,
+            child: SizedBox(
+              width: _anchorWidth(context),
+              child: body,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Measured via [_inputKey], since the overlay context is full-screen.
+  double _anchorWidth(BuildContext context) {
+    final box = _liveBox(_inputKey);
+    return box?.size.width ?? MediaQuery.sizeOf(context).width;
+  }
+
+  RenderBox? _liveBox(GlobalKey key) {
+    final ctx = key.currentContext;
+    if (ctx == null) return null;
+    try {
+      final r = ctx.findRenderObject();
+      return r is RenderBox && r.attached ? r : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  double _boxHeight(GlobalKey key) {
+    final box = _liveBox(key);
+    return (box != null && box.hasSize) ? box.size.height : 0;
+  }
+
+  /// The offset is measured during build, so re-measure after the frame until the panel height settles.
+  void _settleOverlayOffset() {
+    if (_offsetSettleQueued) return;
+    _offsetSettleQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _offsetSettleQueued = false;
+      if (!mounted || !_acPortal.isShowing) return;
+      final settled = _acOffsetNow();
+      if ((settled - _acOffsetUsed).abs() > 0.5) setState(() {});
+    });
+  }
+
+  bool _offsetSettleQueued = false;
+
+  bool _restQueued = false;
+
+  void _queueRestSync() {
+    if (_restQueued) return;
+    _restQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _restQueued = false;
+      if (!mounted ||
+          _popout ||
+          _focus.hasFocus ||
+          _controller.text.isNotEmpty ||
+          _chipBlock() != null) {
+        return;
+      }
+      final root = _liveBox(_rootKey);
+      if (root == null || !root.hasSize) return;
+      final rest = root.size.height;
+      final notifier = ref.read(composerRestExtentProvider.notifier);
+      final prev = notifier.state;
+      if (prev != null && (prev - rest).abs() < 0.5) return;
+      notifier.state = rest;
+    });
+  }
+
+  double _measureOverhang() {
+    if (!_popout) return 0;
+    final root = _liveBox(_rootKey);
+    final box = _liveBox(_popoutBoxKey);
+    if (root == null || box == null || !root.hasSize || !box.hasSize) return 0;
+    return math.max(0.0,
+        root.localToGlobal(Offset.zero).dy - box.localToGlobal(Offset.zero).dy);
+  }
+
+  void _queueOverhangSync() {
+    if (_overhangQueued) return;
+    _overhangQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _overhangQueued = false;
+      if (!mounted) return;
+      final next = _measureOverhang();
+      final overhang = ref.read(composerOverhangProvider.notifier);
+      if ((overhang.state - next).abs() < 0.01) return;
+      overhang.state = next;
+      _queueOverhangSync();
+    });
+  }
+
+  /// The badge tooltip distinguishes developer from bot.
+  MentionBadges _mentionBadges(String pubkey) {
+    final controller = ref.read(nostrControllerProvider);
+    final isDev = controller.isVerifiedDeveloper(pubkey);
+    final isBot = controller.isVerifiedBot(pubkey);
+    final friend = ref.read(appStateProvider).isFriend(pubkey);
+    return (
+      verified: isDev || isBot,
+      friend: friend,
+      verifiedTitle:
+          isDev ? tr('Nymchat Developer') : (isBot ? tr('Nymchat Bot') : null),
+    );
+  }
+
+  Widget _textField(
+      BuildContext context, bool inputEnabled, double topRadius) {
+    final c = context.nym;
+    // Watch so a text-size change re-renders the field live.
+    ref.watch(settingsProvider.select((s) => s.textSize));
+    final fontSize = _inputFontSize();
+    // Flat field caps at 160px (about 140px of text at 1.4 line height).
+    final flatMaxLines = math.max(1, 140 ~/ (fontSize * 1.4));
+    // Bound the popout by the space actually available above the composer, not 40% of the full screen.
+    final mq = MediaQuery.of(context);
+    final available = mq.size.height -
+        mq.padding.top -
+        mq.viewInsets.bottom -
+        _composerRowBase -
+        8;
+    final visible = math.max(
+        0.0, mq.size.height - mq.padding.top - mq.viewInsets.bottom);
+    final popoutMaxHeight = math.max(
+      _composerRowBase,
+      math.min(math.min(visible * 0.4, 360.0), available),
+    );
+    // Grow to fill that box and no further.
+    final popoutLineHeight = mq.textScaler.scale(fontSize) * 1.5;
+    final popoutMaxLines = math.max(
+      1,
+      ((popoutMaxHeight - 20) / popoutLineHeight).floor(),
+    );
+    final flatFill = c.isLight
+        ? Colors.black.withValues(alpha: 0.04)
+        : Colors.white.withValues(alpha: 0.05);
+    final keep = _pillOn ? 1 - _pillT : 1.0;
+    Color fade(Color x) => x.withValues(alpha: x.a * keep);
+    final fill = fade(_popout ? c.bgTertiary : flatFill);
+    final radius = BorderRadius.vertical(
+      top: Radius.circular(topRadius),
+      bottom: const Radius.circular(NymRadius.md),
+    );
+    final border = _FieldBorder(
+      borderRadius: radius,
+      borderSide:
+          BorderSide(color: fade(c.glassBorder)),
+    );
+    // Custom emoji render inline via single PUA sentinel chars painted as images; see [EmojiSentinelController].
+    final incog = ref.watch(incognitoFieldFlagsProvider);
+    final field = ImagePasteScope(
+      limit: _maxUploadBytes,
+      onImage: _pasteImage,
+      child: TextField(
+      // Reparent rather than remount across the popout flip, or the keyboard closes.
+      key: _fieldKey,
+      controller: _controller,
+      focusNode: _focus,
+      contentInsertionConfiguration:
+          ImagePasteScope.keyboardInsertion(_pasteImage),
+      contextMenuBuilder: (context, state) => ImagePasteScope.contextMenu(
+          context, state,
+          limit: _maxUploadBytes, onImage: _pasteImage),
+      enableIMEPersonalizedLearning: incog.imeLearning,
+      autocorrect: incog.autocorrect,
+      enableSuggestions: incog.suggestions,
+      // Taps outside both the field and its dropdown close the dropdown.
+      groupId: _acGroupId,
+      onTapOutside: (_) {
+        if (_overlayActive) _hideOverlay();
+      },
+      // Typable iff SEND is enabled (after connect).
+      enabled: inputEnabled,
+      maxLines: _popout ? popoutMaxLines : flatMaxLines,
+      minLines: 1,
+      scrollController: _fieldScroll,
+      textInputAction: TextInputAction.newline,
+      // Deletes a hidden markdown marker as a whole rather than one invisible char at a time.
+      inputFormatters: const [RichMarkerDeleteFormatter()],
+      onChanged: (_) {
+        _onInputChanged();
+        // `sendTypingStart` self-throttles and gates itself, so calling it per keystroke is safe.
+        final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+        final view = ref.read(appStateProvider).view;
+        if (meshBridge != null && meshBridge.shouldSendOverMesh(view)) {
+          // Throttle mesh typing to ~1/s so we don't flood the radio.
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (now - _lastMeshTypingMs >= 1000) {
+            _lastMeshTypingMs = now;
+            meshBridge.sendTyping(view, true);
+          }
+        } else {
+          ref.read(nostrControllerProvider).sendTypingStart();
+        }
+      },
+      style: TextStyle(
+        // Input text is forced pure white (dark) or black (light), not `--text`.
+        color: c.isLight ? Colors.black : Colors.white,
+        fontSize: fontSize,
+      ),
+      cursorColor: c.isLight ? Colors.black : Colors.white,
+      decoration: InputDecoration(
+        isDense: true,
+        // Inside an open thread the composer replies into it, so the placeholder says so.
+        hintText: ref.watch(activeThreadProvider) != null
+            ? tr('Reply in thread...')
+            : _isBotDm(ref.watch(currentViewProvider))
+                ? tr('Message Nymbot, ? for commands...')
+                : tr('Message, / for commands, ? for Nymbot...'),
+        // One line with ellipsis, or longer translated hints wrap and push the buttons down.
+        hintMaxLines: 1,
+        hintStyle: TextStyle(
+            color: NymField.placeholder(c),
+            fontSize: fontSize),
+        filled: true,
+        fillColor: fill,
+        hoverColor: Colors.transparent,
+        focusColor: Colors.transparent,
+        contentPadding: EdgeInsets.fromLTRB(
+            _pillOn ? _pillTextPad : 16, 10, _pillWanted ? 16 : 38, 10),
+        border: border,
+        enabledBorder: border,
+        focusedBorder: border,
+      ),
+    ),
+    );
+
+    Widget stack = Stack(
+      children: [
+        field,
+        if (!_pillWanted)
+          Positioned(
+            right: 8,
+            bottom: 10,
+            child: CompositedTransformTarget(
+              key: _fieldEmojiKey,
+              link: _emojiAnchor,
+              child: EmojiInputButton(
+                key: const ValueKey('emojiInputBtn'),
+                enabled: inputEnabled,
+                open: _emojiPortal.isShowing,
+                onTap: _toggleEmojiPicker,
+              ),
+            ),
+          ),
+      ],
+    );
+    if (!inputEnabled) {
+      stack = MouseRegion(
+        cursor: SystemMouseCursors.forbidden,
+        child: Opacity(opacity: 0.55, child: stack),
+      );
+    }
+
+    if (!_popout) {
+      // Always rendered, toggling only `show`, so focusing never re-parents the TextField and drops the keyboard.
+      return CssFocusRing(
+        show: false,
+        color: c.primaryA(0.06),
+        radius: radius,
+        child: stack,
+      );
+    }
+    return Container(
+      constraints: BoxConstraints(maxHeight: popoutMaxHeight),
+      decoration: BoxDecoration(
+        borderRadius: NymRadius.rmd,
+        boxShadow: [
+          BoxShadow(
+              color: const Color(0x80000000).withValues(alpha: 0.5 * keep),
+              blurRadius: 32,
+              offset: const Offset(0, 8)),
+        ],
+      ),
+      child: Scrollbar(
+        controller: _fieldScroll,
+        thumbVisibility: true,
+        child: stack,
+      ),
+    );
+  }
+
+  Widget _translateButton(BuildContext context) {
+    final hasText = _controller.text.trim().isNotEmpty;
+    return KeyedSubtree(
+      key: _translateBtnKey,
+      child: CompositedTransformTarget(
+        key: const ValueKey('translateInputBtn'),
+        link: _translateAnchor,
+        child: _TranslateInputButton(
+          glyphKey: _translateGlyphKey,
+          enabled: hasText && !_translating,
+          translating: _translating,
+          onTap: _toggleTranslateDropdown,
+        ),
+      ),
+    );
+  }
+
+  Widget _toolbarEmojiButton() {
+    return CompositedTransformTarget(
+      key: _toolbarEmojiKey,
+      link: _emojiAnchor,
+      child: FormatToolbarIconButton(
+        key: const ValueKey('formatEmojiBtn'),
+        svg: NymIcons.composerEmoji,
+        tooltip: 'Emoji and GIFs',
+        enabled: _rowSendEnabled,
+        active: _emojiPortal.isShowing,
+        onTap: _toggleEmojiPicker,
+      ),
+    );
+  }
+
+  /// Operates on the raw text: each emoji is one sentinel char, so selection offsets line up.
+  Future<void> _pickTimestamp() async {
+    final sel = _controller.selection;
+    final now = DateTime.now();
+    final date = await showDatePicker(
+      context: context,
+      initialDate: now,
+      firstDate: DateTime(1970),
+      lastDate: DateTime(now.year + 100),
+    );
+    if (date == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(now),
+    );
+    if (time == null || !mounted) return;
+    final picked =
+        DateTime(date.year, date.month, date.day, time.hour, time.minute);
+    final text = _controller.text;
+    final out = insertTimestampTag(
+        FormatEdit(text, sel.start, sel.end),
+        (picked.millisecondsSinceEpoch / 1000).floor());
+    _controller.value = TextEditingValue(
+      text: out.text,
+      selection: TextSelection.collapsed(offset: out.start),
+    );
+    _onInputChanged();
+    _focus.requestFocus();
+  }
+
+  bool _handleFormatShortcut(KeyEvent event) {
+    final keyboard = HardwareKeyboard.instance;
+    if (!(keyboard.isControlPressed || keyboard.isMetaPressed) ||
+        keyboard.isAltPressed) {
+      return false;
+    }
+    final label = event.logicalKey.keyLabel;
+    if (label.length != 1) return false;
+    final tool =
+        formatToolForShortcut(label, shift: keyboard.isShiftPressed);
+    if (tool == null) return false;
+    _applyFormatTool(tool);
+    return true;
+  }
+
+  void _applyFormatTool(FormatTool tool) {
+    if (tool.kind == FormatToolKind.picker) {
+      unawaited(_pickTimestamp());
+      return;
+    }
+    final sel = _controller.selection;
+    final text = _controller.text;
+    // A never-focused field reports -1; treat it as the end of the draft.
+    final start = sel.start < 0 ? text.length : sel.start;
+    final end = sel.end < 0 ? text.length : sel.end;
+    final out = applyFormatTool(FormatEdit(text, start, end), tool);
+    _controller.value = TextEditingValue(
+      text: out.text,
+      selection: TextSelection(baseOffset: out.start, extentOffset: out.end),
+    );
+    _onInputChanged();
+    _focus.requestFocus();
+  }
+
+  void _removeAttachment(int index) {
+    final out = removeComposerMedia(_controller.text, index,
+        knownMedia: _uploadedMedia);
+    _controller.value = TextEditingValue(
+      text: out.text,
+      selection: TextSelection.collapsed(offset: out.start),
+    );
+    _onInputChanged();
+    _focus.requestFocus();
+  }
+
+  /// Attachments, upload bar and toolbar between the chip and field; null when empty.
+  Widget? _formatPanels(BuildContext context) {
+    final matches =
+        composerMediaMatches(_controller.text, knownMedia: _uploadedMedia);
+    final panels = <Widget>[];
+
+    // Each layer squares its top corners when any layer is stacked above it.
+    final chipShowing = _pendingEdit != null || _pendingQuote != null;
+    final stripShowing = matches.isNotEmpty || _attachments.isNotEmpty;
+
+    final uploads = [for (final a in _attachments) if (!a.hosted) a];
+    if (uploads.isEmpty) {
+      _composerHd = false;
+      _composerOnce = false;
+    } else {
+      panels.add(MediaOptionsBar(
+        attachments: uploads,
+        hd: _composerHd,
+        once: _composerOnce,
+        hdState: _mediaFeature('hd'),
+        onceState: _mediaFeature('once'),
+        onToggleHd: _toggleComposerHd,
+        onToggleOnce: _toggleComposerOnce,
+      ));
+    }
+
+    // The strip goes first so each preview sits above its own progress.
+    if (stripShowing) {
+      panels.add(ComposerMediaStrip(
+        squareTop: _overlayActive || chipShowing,
+        matches: matches,
+        attachments: _attachments,
+        onRemoveAttachment: _removeAttachment2,
+        onRetry: _retryAttachment,
+        localPreviews: _localMediaPreviews,
+        onRemove: _removeAttachment,
+        onOpen: (m) {
+          // Only stills open fullscreen; the video viewer needs an inline player's controller.
+          if (m.isVideo) return;
+          final images = matches.where((e) => !e.isVideo).toList();
+          final idx = images.indexWhere((e) => e.start == m.start);
+          openFullscreenMedia(
+            context,
+            images.map((e) => proxiedMedia(e.url)).toList(),
+            idx < 0 ? 0 : idx,
+          );
+        },
+      ));
+    }
+
+    if (_toolbarWanted(context)) {
+      panels.add(_ToolbarEntrance(
+        child: FormatToolbar(
+          onTool: _applyFormatTool,
+          squareTop: _overlayActive || chipShowing || stripShowing,
+          leading: [
+            _toolbarEmojiButton(),
+            _translateButton(context),
+          ],
+        ),
+      ));
+    }
+
+    if (panels.isEmpty) return null;
+    // Only one instance is mounted at a time, in flow or in the popout.
+    return KeyedSubtree(
+      key: _panelsKey,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var i = 0; i < panels.length; i++)
+            _shifted(
+              panels.length - i,
+              Padding(
+                padding: EdgeInsets.only(
+                    bottom: _pillWanted ? 0 : (i == panels.length - 1 ? 8 : 4)),
+                child: panels[i],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _toggleTranslateDropdown() async {
+    if (_translatePortal.isShowing) {
+      _hideTranslate();
+      return;
+    }
+    if (_controller.text.trim().isEmpty || _translating) return;
+    _emojiPortal.hide();
+    // Re-read favorites on every open so changes from elsewhere aren't stale.
+    final prefs = await _ensurePrefs();
+    if (!mounted) return;
+    setState(() {
+      _translateFavorites = _loadTranslateFavorites(prefs);
+      _translateQuery = '';
+      _translateLangOrder =
+          sortedTranslateLanguagesWithFavorites(_translateFavorites);
+    });
+    _translateSearchController.clear();
+    _translatePortal.show();
+  }
+
+  Widget _translateDropdown(BuildContext context) {
+    final c = context.nym;
+    final q = _translateQuery.trim().toLowerCase();
+    // Star fill is live; row order uses the open-time snapshot.
+    final favSet = _translateFavorites.toSet();
+    final order = _translateLangOrder.isEmpty
+        ? sortedTranslateLanguagesWithFavorites(_translateFavorites)
+        : _translateLangOrder;
+    final langs = order
+        .where((e) => q.isEmpty || languageSearchKey(e.key, e.value).contains(q))
+        .toList();
+    final btn = globalRectOf(_translateBtnKey);
+    final maxHeight = btn == null
+        ? 320.0
+        : (btn.top - 9 - MediaQuery.paddingOf(context).top - 8)
+            .clamp(0.0, 320.0)
+            .toDouble();
+    _translateMaxUsed = maxHeight;
+    _queueOverlaySync();
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: _hideTranslate,
+          ),
+        ),
+        CompositedTransformFollower(
+          link: _translateAnchor,
+          targetAnchor: Alignment.topLeft,
+          followerAnchor: Alignment.bottomLeft,
+          offset: const Offset(0, -9),
+          showWhenUnlinked: false,
+          child: Align(
+            alignment: Alignment.bottomLeft,
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                width: 230,
+                constraints: BoxConstraints(maxHeight: maxHeight),
+                decoration: BoxDecoration(
+                  color: c.isLight
+                      ? Colors.white.withValues(alpha: 0.98)
+                      : c.bgSecondary,
+                  border: Border.all(
+                      color: c.isLight
+                          ? Colors.black.withValues(alpha: 0.12)
+                          : c.glassBorder),
+                  borderRadius: NymRadius.rmd,
+                  boxShadow: [
+                    BoxShadow(
+                        color: c.isLight
+                            ? Colors.black.withValues(alpha: 0.12)
+                            : const Color(0x66000000),
+                        blurRadius: 24,
+                        offset: const Offset(0, 8)),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        border:
+                            Border(bottom: BorderSide(color: c.glassBorder)),
+                      ),
+                      // Not autofocused: grabbing focus would pull the IME away from the message input.
+                      child: TextField(
+                        controller: _translateSearchController,
+                        focusNode: _translateSearchFocus,
+                        onChanged: (v) => setState(() => _translateQuery = v),
+                        style: TextStyle(color: c.inputText, fontSize: 13),
+                        cursorColor: c.isLight ? Colors.black : Colors.white,
+                        decoration: NymField.decoration(c,
+                          hint: tr('Search languages...'),
+                          fontSize: 13,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 7)),
+                      ),
+                    ),
+                    Flexible(
+                      child: langs.isEmpty
+                          ? Padding(
+                              padding: const EdgeInsets.all(14),
+                              child: Text(tr('No languages found'),
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      color: c.textDim, fontSize: 13)),
+                            )
+                          : ListView.builder(
+                              shrinkWrap: true,
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              itemCount: langs.length,
+                              itemBuilder: (_, i) {
+                                final e = langs[i];
+                                final fav = favSet.contains(e.key);
+                                return _TranslateLangRow(
+                                  name: languageNative(e.key),
+                                  subtitle: languageSubtitle(e.key),
+                                  starLabel:
+                                      '${fav ? tr('Unfavorite') : tr('Favorite')} ${languageName(e.key)}',
+                                  favorited: fav,
+                                  onTap: () => _translateDraft(e.key),
+                                  onToggleFavorite: () =>
+                                      _toggleTranslateFavorite(e.key),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _hideTranslate() {
+    final refocus = _translateSearchFocus.hasFocus;
+    _translatePortal.hide();
+    if (!mounted) return;
+    if (refocus) _focus.requestFocus();
+    setState(() {});
+  }
+
+  double? _pickerAnchorTop() {
+    double? top;
+    for (final key in [_rootKey, if (_popout) _popoutBoxKey]) {
+      final box = _liveBox(key);
+      if (box == null || !box.hasSize) continue;
+      final y = box.localToGlobal(Offset.zero).dy;
+      top = top == null ? y : math.min(top, y);
+    }
+    return top;
+  }
+
+  void _queueOverlaySync() {
+    if (_overlaySyncQueued) return;
+    _overlaySyncQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _overlaySyncQueued = false;
+      if (!mounted) return;
+      var stale = false;
+      if (_emojiPortal.isShowing) {
+        final top = _pickerAnchorTop();
+        final used = _pickerAnchorUsed;
+        stale = top != null && (used == null || (top - used).abs() > 0.5);
+      }
+      if (!stale && _translatePortal.isShowing) {
+        final btn = globalRectOf(_translateBtnKey);
+        final used = _translateMaxUsed;
+        if (btn != null && used != null) {
+          final want = (btn.top - 9 - MediaQuery.paddingOf(context).top - 8)
+              .clamp(0.0, 320.0);
+          stale = (want - used).abs() > 0.5;
+        }
+      }
+      if (stale) setState(() {});
+    });
+  }
+
+  /// Replaces the input with the translation; quote/edit chips are preserved.
+  Future<void> _translateDraft(String targetLang) async {
+    _hideTranslate();
+    // Expand sentinels before the external service sees the draft.
+    final text = _draftText().trim();
+    if (text.isEmpty) return;
+    setState(() => _translating = true);
+    try {
+      final res = await TranslateService().translate(text, targetLang);
+      if (!mounted) return;
+      final out = res.translatedText;
+      // Keep the input when the result is empty or echoes the original.
+      if (out.trim().isEmpty || out.trim() == text) {
+        _onSystemMessage(tr(
+            'Nothing to translate (text may already be in the target language).'));
+        return;
+      }
+      _controller.text = out;
+      _controller.selection =
+          TextSelection.collapsed(offset: _controller.text.length);
+    } catch (e) {
+      // [TranslateException.message] already carries the "Translation failed:" prefix.
+      if (mounted) {
+        _onSystemMessage(e is TranslateException
+            ? e.message
+            : tr('Translation failed: Unknown error'));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _translating = false);
+        _onInputChanged();
+      }
+    }
+  }
+
+  Widget _attachButton({double bare = 0}) {
+    return _IconBtn(
+      key: _attachKey,
+      svg: ComposerIcons.plus,
+      tooltip: tr('Attach'),
+      bare: bare,
+      onTap: () => unawaited(_openAttachMenu()),
+    );
+  }
+
+  List<AttachItem> _attachModel() {
+    final view = _chatView();
+    final round = _mediaFeature('round');
+    return attachItems(
+      surface: mediaSurface(view),
+      route: _currentMediaRoute(view),
+      round: RoundState(round.state, round.reason),
+      bot: _isBotDm(view),
+    );
+  }
+
+  Future<void> _openAttachMenu() async {
+    if (_emojiPortal.isShowing) _hideEmojiPicker();
+    final items = _attachModel();
+    final id = await showComposerMenu(
+      context,
+      kind: 'attach',
+      label: tr('Attach'),
+      entries: [for (final it in items) ComposerMenuEntry.attach(it)],
+      anchor: globalRectOf(_attachKey),
+    );
+    if (id == null || !mounted) return;
+    final fresh = _attachModel();
+    final item = fresh.where((i) => i.id == id).firstOrNull;
+    if (item == null) return;
+    if (!item.enabled) {
+      if (item.detail.isNotEmpty) _onSystemMessage(tr(item.detail));
+      return;
+    }
+    _runAttach(id);
+  }
+
+  bool _isBotDm(ChatView view) =>
+      view.kind == ViewKind.pm &&
+      ref.read(nostrControllerProvider).isVerifiedBot(view.id);
+
+  void _openPoll() {
+    if (!mounted) return;
+    final view = _chatView();
+    final refused = ref.read(dmPollsProvider).refusal(view);
+    if (refused.isNotEmpty) {
+      _onSystemMessage(refused);
+      return;
+    }
+    if (pollAllowedOn(mediaSurface(view), bot: _isBotDm(view))) {
+      PollCreateModal.open(context);
+    }
+  }
+
+  bool get _canUpload =>
+      ref.read(appStateProvider).connectedRelays > 0 ||
+      ref.read(nostrControllerProvider).isLive;
+
+  void _runAttach(String id) {
+    final view = _chatView();
+    final route = _currentMediaRoute(view);
+    switch (id) {
+      case 'photo':
+        if (hasPendingUploads) return;
+        if (!_canUpload && route != 'mesh') {
+          _onSystemMessage(tr(MediaNoteReasons.hdOffline));
+          return;
+        }
+        unawaited(_pickAndUploadImage());
+      case 'file':
+        if (!_canUpload && route != 'mesh') {
+          _onSystemMessage(tr(MediaNoteReasons.hdOffline));
+          return;
+        }
+        unawaited(_pickAndShareFile());
+      case 'location':
+        if (view.kind == ViewKind.channel) return;
+        showGtShareLocation(context,
+            view.kind == ViewKind.group ? GtChat.group(view.id) : GtChat.dm(view.id));
+      case 'videoNote':
+        unawaited(_openVideoNote());
+      case 'poll':
+        _openPoll();
+      case 'event':
+        if (view.kind == ViewKind.group) {
+          unawaited(showGtCreateEvent(context, view.id));
+        }
+    }
+  }
+
+  Future<void> _openSendMenu() async {
+    final asRows = await _sendAsRows();
+    if (!mounted) return;
+    final index = ref.read(accountsProvider)?.changes.value;
+    final id = await showComposerMenu(
+      context,
+      kind: 'send',
+      label: tr('Send options'),
+      entries: [
+        for (final it in sendMenuItems(canAnon: _anonEligible))
+          ComposerMenuEntry.send(it),
+        if (asRows.isNotEmpty) ComposerMenuEntry.sendAsHeader(),
+        for (final r in asRows)
+          ComposerMenuEntry.sendAs(
+            r,
+            pubkey: index?.byId(r.account)?.pubkey ?? '',
+            avatar: index?.byId(r.account)?.avatar ?? '',
+          ),
+      ],
+      anchor: globalRectOf(_sendSplitKey),
+    );
+    if (!mounted) return;
+    if (id == null) {
+      if (_sendMenuFocus.context != null) {
+        _sendMenuFocus.requestFocus();
+      } else {
+        _focus.requestFocus();
+      }
+      return;
+    }
+    if (id == 'later') _openSendLater();
+    if (id == 'anon' && _anonEligible) _sendAnon();
+    if (id.startsWith('as:')) await _sendAs(id.substring(3));
+  }
+
+  bool get _sendAsAllowed {
+    final view = _chatView();
+    final controller = ref.read(nostrControllerProvider);
+    final mesh = ref
+            .read(meshControllerProvider.notifier)
+            .bridge
+            ?.shouldSendOverMesh(view) ??
+        false;
+    return canSendAs(
+      loggedIn: controller.identity != null,
+      anonymousActive: controller.sendAsAnonymousActive,
+      surface: mediaSurface(view),
+      editing: _pendingEdit != null,
+      mesh: view.kind == ViewKind.channel && mesh,
+      command: isCommandLine(_draftText().trim()),
+    );
+  }
+
+  bool get _quotePending {
+    if (_pendingQuote == null) return false;
+    final id = _pendingQuoteId;
+    if (id.isEmpty) return false;
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(id)) return true;
+    return QueuedSends.instance.isQueued(id);
+  }
+
+  String _sendAsPreview() {
+    var content = _draftText();
+    final urls = attachmentUrls;
+    if (urls.isNotEmpty) {
+      final needsSpace = content.isNotEmpty && !content.endsWith(' ');
+      content = '$content${needsSpace ? ' ' : ''}${urls.join(' ')}';
+    }
+    final quote = _pendingQuote;
+    if (quote != null) {
+      final first = quote.text.split('\n').first;
+      content = '> @${quote.author}: $first\n\n$content';
+    }
+    return content;
+  }
+
+  Future<List<SendAsRow>> _sendAsRows() async {
+    if (!_sendAsAllowed) return const [];
+    try {
+      return await ref
+          .read(nostrControllerProvider)
+          .sendAsMenuRows(_sendAsPreview(), quotePending: _quotePending);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> _sendAs(String accountId) async {
+    final rows = await _sendAsRows();
+    if (!mounted) return;
+    final row = rows.where((r) => r.account == accountId).firstOrNull;
+    if (row == null) {
+      _onSystemMessage(tr(SendAsStrings.removed));
+      return;
+    }
+    if (!row.enabled) {
+      if (row.reason.isNotEmpty) _onSystemMessage(tr(row.reason));
+      return;
+    }
+    if (hasPendingUploads) {
+      _onSystemMessage(
+          tr('Still uploading — send again once the attachments finish.'));
+      return;
+    }
+    final typed = _draftText();
+    final urls = attachmentUrls;
+    if (typed.trim().isEmpty && urls.isEmpty && _pendingQuote == null) return;
+    var composed = typed;
+    if (urls.isNotEmpty) {
+      final needsSpace = composed.isNotEmpty && !composed.endsWith(' ');
+      composed = '$composed${needsSpace ? ' ' : ''}${urls.join(' ')}';
+    }
+    final quote = _pendingQuote;
+    final quoteId = _pendingQuoteId;
+    final content = _composeOutgoing(composed);
+    final controller = ref.read(nostrControllerProvider);
+    _pushSentHistory(content);
+    _controller.clear();
+    _endAllUploadActivities();
+    _attachments.clear();
+    _popout = false;
+    _syncPopoutPortal();
+    _hideOverlay();
+    setState(() {});
+    _focus.requestFocus();
+    final result =
+        await controller.sendChannelAs(accountId, content, draft: composed);
+    if (!mounted) return;
+    _onSendAsResult(result, composed, quote, quoteId);
+  }
+
+  bool _restoreSendAsDraft(String composed,
+      ({String author, String text, String fullText})? quote, String quoteId) {
+    if (_controller.text.isNotEmpty || _pendingQuote != null) return false;
+    _controller.value = TextEditingValue(
+      text: composed,
+      selection: TextSelection.collapsed(offset: composed.length),
+    );
+    _pendingQuote = quote;
+    _pendingQuoteId = quoteId;
+    _onInputChanged();
+    setState(() {});
+    return true;
+  }
+
+  void _onSendAsResult(
+      SendAsResult result,
+      String composed,
+      ({String author, String text, String fullText})? quote,
+      String quoteId) {
+    if (result.ok) {
+      Haptics.light();
+      showToast(tr(SendAsStrings.sentAs, {'nym': result.label}),
+          kind: ToastKind.success);
+      return;
+    }
+    final back = _restoreSendAsDraft(composed, quote, quoteId);
+    if (result.status == 'failed') {
+      final placeholder = result.placeholder;
+      if (placeholder.isNotEmpty) {
+        ComposerDrafts.failedSendAs[placeholder] =
+            (composed: composed, quote: quote, quoteId: quoteId);
+      }
+      _sendAsFailedToast(result.label, placeholder, back);
+      return;
+    }
+    if (result.reason.isNotEmpty) _onSystemMessage(tr(result.reason));
+  }
+
+  void _sendAsFailedToast(String label, String placeholder, bool back) {
+    ToastCenter.instance.show(
+      tr(back ? SendAsStrings.failed : SendAsStrings.failedShort,
+          {'nym': label}),
+      kind: ToastKind.error,
+      action: placeholder.isEmpty ? null : tr('Retry'),
+      onAction: placeholder.isEmpty
+          ? null
+          : () => unawaited(_retrySendAs(placeholder)),
+    );
+  }
+
+  Future<void> _retrySendAs(String placeholder) async {
+    final draft = ComposerDrafts.failedSendAs[placeholder];
+    final result =
+        await ref.read(nostrControllerProvider).retrySendAs(placeholder);
+    if (result.ok) {
+      ComposerDrafts.failedSendAs.remove(placeholder);
+      if (mounted && draft != null && _controller.text == draft.composed) {
+        _controller.clear();
+        _pendingQuote = null;
+        setState(() {});
+      }
+      Haptics.light();
+      showToast(tr(SendAsStrings.sentAs, {'nym': result.label}),
+          kind: ToastKind.success);
+      return;
+    }
+    if (result.status == 'failed') {
+      final back = mounted &&
+          draft != null &&
+          (_controller.text == draft.composed ||
+              _restoreSendAsDraft(draft.composed, draft.quote, draft.quoteId));
+      _sendAsFailedToast(result.label, placeholder, back);
+      return;
+    }
+    ComposerDrafts.failedSendAs.remove(placeholder);
+    if (mounted && result.reason.isNotEmpty) {
+      _onSystemMessage(tr(result.reason));
+    }
+  }
+
+  void _putBackSendAs(String placeholder) {
+    final draft = ComposerDrafts.failedSendAs.remove(placeholder);
+    final controller = ref.read(nostrControllerProvider);
+    String? text = draft?.composed;
+    if (text == null) {
+      for (final m in ref.read(appStateProvider).messages.values.expand((l) => l)) {
+        if (m.id == placeholder) {
+          text = m.content;
+          break;
+        }
+      }
+    }
+    controller.dropSendAsRetry(placeholder);
+    ref.read(appStateProvider.notifier).dropSendAsPlaceholder(placeholder);
+    if (text == null || text.isEmpty) return;
+    if (_controller.text.trim().isEmpty && _pendingQuote == null) {
+      _restoreSendAsDraft(text, draft?.quote, draft?.quoteId ?? '');
+      return;
+    }
+    if (_controller.text.contains(text)) return;
+    final next = '${_controller.text}\n$text';
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: next.length),
+    );
+    _onInputChanged();
+  }
+
+  Widget _primaryButton(bool sendEnabled, bool phone,
+      {double inset = 0, double bare = 0}) {
+    final action = primaryAction(
+      text: _controller.text,
+      attachments: _attachments.length,
+      editing: _pendingEdit != null,
+      quoting: _pendingQuote != null,
+      recording: _voice != null,
+    );
+    if (action == 'mic') return _micButton(bare: bare);
+    return _SendButton(
+      key: _sendSplitKey,
+      enabled: sendEnabled,
+      onTap: _send,
+      onMenu: () => unawaited(_openSendMenu()),
+      menuFocus: _sendMenuFocus,
+      phone: phone,
+      inset: inset,
+    );
+  }
+
+  ChatView _chatView() => ref.read(appStateProvider).view;
+
+  String _mediaTooltip(String label, MediaFeatureState st) =>
+      st.reason.isEmpty ? tr(label) : '${tr(label)} — ${tr(st.reason)}';
+
+  Widget _micButton({double bare = 0}) {
+    final st = _mediaFeature('voice');
+    return VoiceMicGesture(
+      key: const ValueKey('voiceRecordBtn'),
+      recording: () => _voice != null,
+      onStart: _startVoice,
+      onLock: _lockVoice,
+      onCancel: () => _stopVoice(false),
+      onRelease: () => _stopVoice(true),
+      onDrag: (dx) => _voice?.drag(dx),
+      child: _IconBtn(
+        svg: NymIcons.composerMic,
+        tooltip: _mediaTooltip('Voice message', st),
+        enabled: st.level != MediaFeatureLevel.off,
+        active: _voice != null,
+        warn: st.level == MediaFeatureLevel.warn,
+        bare: bare,
+        onTap: () {},
+      ),
+    );
+  }
+
+  Widget _pickerOverlay(BuildContext context) {
+    final tabs = PickerTabs(active: _pickerTab, onSelect: _switchPickerTab);
+    final gif = _pickerTab == 'gif' && _prefs != null;
+    final media = MediaQuery.of(context);
+    final isPhone = media.size.width <= NymDimens.mobileBreakpoint;
+    final inBar = _pillWanted ? globalRectOf(_toolbarEmojiKey) : null;
+    final view = View.of(context);
+    final keyboard = view.viewInsets.bottom / view.devicePixelRatio;
+    final screenBottom = media.size.height - keyboard;
+    final double bottom;
+    final double? maxHeight;
+    if (isPhone) {
+      final anchor = _pickerAnchorTop();
+      _pickerAnchorUsed = anchor;
+      _queueOverlaySync();
+      final limit = math.min(anchor ?? screenBottom - 60, screenBottom) - 8;
+      bottom = media.size.height - limit;
+      maxHeight = math.max(0.0, limit - media.padding.top - 8);
+    } else {
+      final button = inBar ?? globalRectOf(_fieldEmojiKey);
+      bottom = 0;
+      maxHeight = button == null
+          ? null
+          : math.max(0.0,
+              button.top - (inBar != null ? 10 : 8) - media.padding.top - 8);
+    }
+    return _popover(
+      media: media,
+      isPhone: isPhone,
+      inBar: inBar != null,
+      bottom: bottom,
+      link: _emojiAnchor,
+      onDismiss: _hideEmojiPicker,
+      phoneWidthFactor: gif ? 0.9 : null,
+      child: gif
+          ? GifPicker(
+              key: const ValueKey('gifPicker'),
+              favoritesStore: FavoriteGifsStore(_prefs!),
+              onSelect: _onGifSelected,
+              onClose: _hideEmojiPicker,
+              tabs: tabs,
+              maxHeight: maxHeight,
+            )
+          : EmojiPicker(
+              key: const ValueKey('emojiPicker'),
+              recents: _recents,
+              onSelect: _onEmojiSelected,
+              onClose: _hideEmojiPicker,
+              tabs: tabs,
+              maxHeight: maxHeight,
+            ),
+    );
+  }
+
+  /// Picker above its anchor with a tap-out barrier; [phoneWidthFactor] sets a viewport fraction on phones.
+  Widget _popover({
+    required MediaQueryData media,
+    required bool isPhone,
+    required bool inBar,
+    required double bottom,
+    required LayerLink link,
+    required VoidCallback onDismiss,
+    required Widget child,
+    double? phoneWidthFactor,
+  }) {
+    final picker = Material(type: MaterialType.transparency, child: child);
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            excludeFromSemantics: true,
+            onTap: onDismiss,
+          ),
+        ),
+        if (isPhone)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: bottom,
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: phoneWidthFactor != null
+                  ? ConstrainedBox(
+                      constraints: BoxConstraints(
+                          maxWidth: media.size.width * phoneWidthFactor),
+                      child: picker,
+                    )
+                  : ConstrainedBox(
+                      constraints: BoxConstraints(
+                          maxWidth: media.size.width - 16 < 350
+                              ? media.size.width - 16
+                              : 350),
+                      child: picker,
+                    ),
+            ),
+          )
+        else
+          CompositedTransformFollower(
+            link: link,
+            targetAnchor: inBar ? Alignment.topLeft : Alignment.topRight,
+            followerAnchor: inBar ? Alignment.bottomLeft : Alignment.bottomRight,
+            offset: Offset(0, inBar ? -10 : -8),
+            showWhenUnlinked: false,
+            child: Align(
+              alignment: inBar ? Alignment.bottomLeft : Alignment.bottomRight,
+              child: picker,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _IconBtn extends StatefulWidget {
+  const _IconBtn({
+    super.key,
+    required this.svg,
+    required this.tooltip,
+    this.enabled = true,
+    this.onTap,
+    this.active = false,
+    this.warn = false,
+    this.bare = 0,
+  });
+
+  final bool active;
+  final bool warn;
+  final double bare;
+
+  final String svg;
+  final String tooltip;
+
+  /// False dims and disables the button; the composer gates it on relay connection.
+  final bool enabled;
+  final VoidCallback? onTap;
+
+  @override
+  State<_IconBtn> createState() => _IconBtnState();
+}
+
+class _IconBtnState extends State<_IconBtn> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final enabled = widget.enabled;
+    final hovered = enabled && _hover;
+    // Same `.icon-btn` chrome as the header pills; SVG strokes stay `--text` at rest even in light mode.
+    final Color fill;
+    final Color borderColor;
+    if (c.isLight) {
+      fill = hovered
+          ? Colors.black.withValues(alpha: 0.06)
+          : Colors.black.withValues(alpha: 0.03);
+      borderColor = hovered ? c.primary : Colors.black.withValues(alpha: 0.1);
+    } else {
+      fill = hovered ? c.primaryA(0.12) : Colors.white.withValues(alpha: 0.05);
+      borderColor = hovered ? c.primaryA(0.30) : c.glassBorder;
+    }
+    final keep = 1 - widget.bare.clamp(0.0, 1.0);
+    final glyphColor = widget.active
+        ? c.danger
+        : (widget.warn ? c.warning : (hovered ? c.primary : c.text));
+    final shownFill = fill.withValues(alpha: fill.a * keep);
+    final shownBorder = widget.active
+        ? c.danger
+        : borderColor.withValues(alpha: borderColor.a * keep);
+    final btn = NymFocusable(
+      onActivate: enabled ? (widget.onTap ?? () {}) : null,
+      tooltip: widget.tooltip,
+      radius: NymRadius.rsm,
+      child: MouseRegion(
+        cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        onEnter: enabled ? (_) => setState(() => _hover = true) : null,
+        onExit: enabled ? (_) => setState(() => _hover = false) : null,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          decoration: BoxDecoration(
+            color: shownFill,
+            borderRadius: NymRadius.rsm,
+            border: Border.all(color: shownBorder),
+            boxShadow: hovered && keep > 0.5
+                ? [BoxShadow(color: c.primaryA(0.10), blurRadius: 15)]
+                : null,
+          ),
+          child: Material(
+            color: Colors.transparent,
+            borderRadius: NymRadius.rsm,
+            child: InkWell(
+              onTap: enabled ? (widget.onTap ?? () {}) : null,
+              canRequestFocus: false,
+              excludeFromSemantics: true,
+              borderRadius: NymRadius.rsm,
+              child: Container(
+                height: 42,
+                constraints: const BoxConstraints(minWidth: 42),
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                alignment: Alignment.center,
+                child: NymSvgIcon(
+                  widget.svg,
+                  size: 18,
+                  color: glyphColor,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    if (enabled) return btn;
+    return Opacity(opacity: 0.35, child: btn);
+  }
+}
+
+class _SendButton extends StatefulWidget {
+  const _SendButton({
+    super.key,
+    required this.enabled,
+    required this.onTap,
+    required this.onMenu,
+    this.menuFocus,
+    this.phone = false,
+    this.inset = 0,
+  });
+  final bool enabled;
+  final VoidCallback onTap;
+  final VoidCallback onMenu;
+  final FocusNode? menuFocus;
+
+  final bool phone;
+  final double inset;
+
+  @override
+  State<_SendButton> createState() => _SendButtonState();
+}
+
+class _SendButtonState extends State<_SendButton> {
+  bool _hover = false;
+  bool _chevronHover = false;
+  bool _sendRing = false;
+
+  Timer? _holdTimer;
+  bool _menuFired = false;
+  DateTime _suppressClickUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
+  @override
+  void dispose() {
+    _holdTimer?.cancel();
+    super.dispose();
+  }
+
+  void _openMenu() {
+    _menuFired = true;
+    _suppressClickUntil = DateTime.now().add(const Duration(milliseconds: 800));
+    Haptics.selection();
+    widget.onMenu();
+  }
+
+  void _startHold(PointerDownEvent e) {
+    if (!widget.enabled || _holdTimer != null) return;
+    if (e.kind == PointerDeviceKind.mouse && e.buttons != kPrimaryMouseButton) {
+      return;
+    }
+    _menuFired = false;
+    _holdTimer = Timer(const Duration(milliseconds: 500), () {
+      _holdTimer = null;
+      if (!mounted) return;
+      _openMenu();
+    });
+  }
+
+  void _cancelHold() {
+    _holdTimer?.cancel();
+    _holdTimer = null;
+  }
+
+  void _maybeCancelOnExit(PointerMoveEvent e) {
+    if (e.kind != PointerDeviceKind.mouse || _holdTimer == null) return;
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    if (!(Offset.zero & box.size).contains(box.globalToLocal(e.position))) {
+      _cancelHold();
+    }
+  }
+
+  void _handleTap() {
+    if (_menuFired || DateTime.now().isBefore(_suppressClickUntil)) {
+      _menuFired = false;
+      return;
+    }
+    if (widget.enabled) widget.onTap();
+  }
+
+  KeyEventResult _onKey(FocusNode _, KeyEvent e) {
+    if (e is! KeyDownEvent || !widget.enabled) return KeyEventResult.ignored;
+    final key = e.logicalKey == LogicalKeyboardKey.contextMenu
+        ? 'ContextMenu'
+        : (e.logicalKey == LogicalKeyboardKey.f10 ? 'F10' : '');
+    if (!isMenuKey(key, shift: HardwareKeyboard.instance.isShiftPressed)) {
+      return KeyEventResult.ignored;
+    }
+    widget.onMenu();
+    return KeyEventResult.handled;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final hovering = _hover && widget.enabled;
+    final List<BoxShadow>? glow = hovering
+        ? [BoxShadow(color: c.primaryA(0.10), blurRadius: 15)]
+        : null;
+    const left = BorderRadius.horizontal(left: Radius.circular(NymRadius.sm));
+    const right = BorderRadius.horizontal(right: Radius.circular(NymRadius.sm));
+    final send = MouseRegion(
+      cursor: widget.enabled
+          ? SystemMouseCursors.click
+          : SystemMouseCursors.forbidden,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onSecondaryTapUp: widget.enabled
+            ? (_) {
+                _cancelHold();
+                _openMenu();
+              }
+            : null,
+        child: Listener(
+          onPointerDown: _startHold,
+          onPointerMove: _maybeCancelOnExit,
+          onPointerUp: (_) => _cancelHold(),
+          onPointerCancel: (_) => _cancelHold(),
+          child: AnimatedContainer(
+            duration: NymMotion.transition,
+            curve: NymMotion.curve,
+            decoration: BoxDecoration(
+              color: c.primaryA(hovering ? 0.18 : 0.10),
+              borderRadius: left,
+              border: Border.all(color: c.primaryA(0.30)),
+              boxShadow: glow,
+            ),
+            child: Material(
+              type: MaterialType.transparency,
+              borderRadius: left,
+              child: Focus(
+                onKeyEvent: _onKey,
+                skipTraversal: true,
+                child: InkWell(
+                  key: const ValueKey('composer-send'),
+                  onTap: widget.enabled ? _handleTap : null,
+                  onFocusChange: (v) {
+                    final ring = v &&
+                        FocusManager.instance.highlightMode ==
+                            FocusHighlightMode.traditional;
+                    if (ring != _sendRing) setState(() => _sendRing = ring);
+                  },
+                  focusColor: Colors.transparent,
+                  borderRadius: left,
+                  child: NymTooltip(
+                    message: tr('Send'),
+                    child: Semantics(
+                      button: true,
+                      label: tr('Send'),
+                      excludeSemantics: true,
+                      child: CssFocusRing(
+                        show: _sendRing,
+                        color: c.secondary,
+                        radius: left,
+                        width: NymFocusable.ringWidth,
+                        child: Container(
+                          height: 42 - 2 * widget.inset,
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                          alignment: Alignment.center,
+                          child: NymSvgIcon(ComposerIcons.paperPlane,
+                              size: 18, color: c.primary),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final chevron = NymTooltip(
+      message: tr('More send options'),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _chevronHover = true),
+        onExit: (_) => setState(() => _chevronHover = false),
+        child: Container(
+          decoration: BoxDecoration(
+            color: c.primaryA(_chevronHover && widget.enabled ? 0.18 : 0.10),
+            borderRadius: right,
+            border: Border(
+              top: BorderSide(color: c.primaryA(0.30)),
+              right: BorderSide(color: c.primaryA(0.30)),
+              bottom: BorderSide(color: c.primaryA(0.30)),
+            ),
+          ),
+          child: Material(
+            type: MaterialType.transparency,
+            borderRadius: right,
+            child: InkWell(
+              key: const ValueKey('sendMenuBtn'),
+              focusNode: widget.menuFocus,
+              onTap: widget.enabled ? widget.onMenu : null,
+              borderRadius: right,
+              child: SizedBox(
+                width: 24,
+                height: 42 - 2 * widget.inset,
+                child: Center(
+                  child: NymSvgIcon(ComposerIcons.chevronUp,
+                      size: 14, color: c.primary),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    return Padding(
+      padding: EdgeInsets.fromLTRB(0, widget.inset, widget.inset, widget.inset),
+      child: Opacity(
+        opacity: widget.enabled ? 1 : 0.35,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [send, chevron],
+        ),
+      ),
+    );
+  }
+}
+
+class _FieldBorder extends OutlineInputBorder {
+  const _FieldBorder({super.borderSide, super.borderRadius});
+
+  @override
+  ShapeBorder? lerpFrom(ShapeBorder? a, double t) =>
+      a is OutlineInputBorder && a.borderSide == borderSide
+          ? this
+          : super.lerpFrom(a, t);
+}
+
+class _PreviewChip extends StatelessWidget {
+  const _PreviewChip({
+    required this.barColor,
+    required this.content,
+    required this.onClose,
+    required this.closeTooltip,
+    this.squareTop = false,
+  });
+
+  final Color barColor;
+  final Widget content;
+  final VoidCallback onClose;
+  final String closeTooltip;
+
+  final bool squareTop;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(end: squareTop ? 0 : NymRadius.md),
+      duration: NymMotion.transition,
+      curve: NymMotion.curve,
+      builder: (context, topRadius, child) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          // Solid-ui light plate differs from the light bg-tertiary token, so it is set explicitly.
+          color:
+              c.solidUi && c.isLight ? const Color(0xFFECECEA) : c.bgTertiary,
+          border: Border.all(color: c.glassBorder),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(topRadius)),
+          boxShadow: [
+            BoxShadow(
+              color:
+                  c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
+              blurRadius: 32,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: child,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            width: 3,
+            constraints: const BoxConstraints(minHeight: 28),
+            decoration: BoxDecoration(
+              color: barColor,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: content),
+          const SizedBox(width: 8),
+          _ChipCloseButton(tooltip: closeTooltip, onTap: onClose),
+        ],
+      ),
+    );
+  }
+}
+
+/// Slide-in replayed on each (re)mount.
+class _ChipSlideIn extends StatefulWidget {
+  const _ChipSlideIn({super.key, required this.child});
+  final Widget child;
+
+  @override
+  State<_ChipSlideIn> createState() => _ChipSlideInState();
+}
+
+class _ChipSlideInState extends State<_ChipSlideIn>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 200),
+  )..forward();
+  late final CurvedAnimation _t =
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeOut);
+
+  @override
+  void dispose() {
+    _t.dispose();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _t,
+      child: AnimatedBuilder(
+        animation: _t,
+        builder: (context, child) => Transform.translate(
+          offset: Offset(0, 8 * (1 - _t.value)),
+          child: child,
+        ),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// Quote chip: author with avatar and flair over the truncated quoted text.
+class _QuotePreviewChip extends ConsumerWidget {
+  const _QuotePreviewChip({
+    required this.author,
+    required this.text,
+    required this.onClose,
+    this.squareTop = false,
+  });
+
+  final String author;
+  final String text;
+  final VoidCallback onClose;
+  final bool squareTop;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.nym;
+    final split = splitNymSuffix(author);
+    final base = split.base;
+    final suffix = split.suffix;
+    // Unresolved authors render plain.
+    final users = ref.watch(usersProvider);
+    final t = resolveTarget(author, users);
+    return _PreviewChip(
+      barColor: c.primary,
+      onClose: onClose,
+      closeTooltip: tr('Cancel reply'),
+      squareTop: squareTop,
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (t != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: 3),
+                  child: NymAvatar(
+                    seed: t.pubkey,
+                    size: 12,
+                    imageUrl: users[t.pubkey]?.profile?.picture,
+                  ),
+                ),
+              Flexible(
+                child: NymLabel(
+                  base,
+                  suffix: suffix,
+                  style: TextStyle(
+                      color: c.primary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (t != null)
+                CosmeticNymBadges(
+                  cosmetics: ref.watch(userCosmeticsProvider(t.pubkey)),
+                  flairSize: 12,
+                  supporterHeight: 12,
+                ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          // Renders custom emoji as images, like the PWA quote preview.
+          InlineEmojiText(
+            text: text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: c.textDim, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EditPreviewChip extends StatelessWidget {
+  const _EditPreviewChip({
+    required this.text,
+    required this.onClose,
+    this.squareTop = false,
+  });
+
+  static const Color amber = Color(0xFFF0AD4E);
+
+  final String text;
+  final VoidCallback onClose;
+  final bool squareTop;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return _PreviewChip(
+      barColor: amber,
+      onClose: onClose,
+      closeTooltip: tr('Cancel edit'),
+      squareTop: squareTop,
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            tr('Editing message'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+                color: amber, fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: c.textDim, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChipCloseButton extends StatefulWidget {
+  const _ChipCloseButton({required this.tooltip, required this.onTap});
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  State<_ChipCloseButton> createState() => _ChipCloseButtonState();
+}
+
+class _ChipCloseButtonState extends State<_ChipCloseButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return NymTooltip(
+      message: widget.tooltip,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: Container(
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: _hover
+                  ? (c.isLight
+                      ? Colors.black.withValues(alpha: 0.08)
+                      : Colors.white.withValues(alpha: 0.1))
+                  : null,
+              borderRadius: NymRadius.rxs,
+            ),
+            child: NymSvgIcon(
+              NymIcons.close,
+              size: 16,
+              color: _hover ? (c.isLight ? c.text : Colors.white) : c.textDim,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Pulses while [translating]; disabled when the draft is empty.
+class _TranslateInputButton extends StatefulWidget {
+  const _TranslateInputButton({
+    required this.glyphKey,
+    required this.enabled,
+    required this.translating,
+    required this.onTap,
+  });
+
+  final Key glyphKey;
+  final bool enabled;
+  final bool translating;
+  final VoidCallback onTap;
+
+  @override
+  State<_TranslateInputButton> createState() => _TranslateInputButtonState();
+}
+
+class _TranslateInputButtonState extends State<_TranslateInputButton>
+    with SingleTickerProviderStateMixin {
+  bool _hover = false;
+  late final AnimationController _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    // Created eagerly so dispose always has a controller; a lazy field would tick a deactivated State.
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _TranslateInputButton old) {
+    super.didUpdateWidget(old);
+    if (widget.translating && !_pulse.isAnimating) {
+      _pulse.repeat(reverse: true);
+    } else if (!widget.translating && _pulse.isAnimating) {
+      _pulse.stop();
+      _pulse.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    // The rest dim is folded into the glyph color, since an [Opacity] wrapper costs a saveLayer per frame.
+    final restAlpha = widget.translating || widget.enabled ? 1.0 : 0.4;
+    final base = _hover && widget.enabled ? c.primary : c.textDim;
+    final color = base.withValues(alpha: base.a * restAlpha);
+    Widget glyph = NymSvgIcon(NymIcons.translate,
+        key: widget.glyphKey, size: 16, color: color);
+    if (widget.translating) {
+      glyph = FadeTransition(
+        opacity: Tween(begin: 0.4, end: 0.8).animate(_pulse),
+        child: glyph,
+      );
+    }
+    // The pulse replaces the base opacity, so don't also apply the disabled dim.
+    return NymTooltip(
+        message: tr('Translate text'),
+        child: MouseRegion(
+          cursor: widget.enabled
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.basic,
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: GestureDetector(
+            onTap: widget.enabled ? widget.onTap : null,
+            // Opaque is load-bearing: nothing else here hit-tests, so taps fell through.
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              width: 28,
+              height: 26,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: _hover && widget.enabled
+                    ? (c.isLight
+                        ? Colors.black.withValues(alpha: 0.06)
+                        : Colors.white.withValues(alpha: 0.08))
+                    : null,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: glyph,
+            ),
+          ),
+        ),
+    );
+  }
+}
+
+/// Language row with a trailing favorite star.
+class _TranslateLangRow extends StatefulWidget {
+  const _TranslateLangRow({
+    required this.name,
+    required this.subtitle,
+    required this.starLabel,
+    required this.favorited,
+    required this.onTap,
+    required this.onToggleFavorite,
+  });
+
+  final String name;
+
+  /// The English name under the endonym, when it adds something.
+  final String subtitle;
+  final String starLabel;
+  final bool favorited;
+  final VoidCallback onTap;
+  final VoidCallback onToggleFavorite;
+
+  @override
+  State<_TranslateLangRow> createState() => _TranslateLangRowState();
+}
+
+class _TranslateLangRowState extends State<_TranslateLangRow> {
+  bool _hover = false;
+  bool _starHover = false;
+
+  static const Color _favColor = Color(0xFFF5C518);
+
+  Widget _star(Widget child) => Semantics(
+        button: true,
+        label: widget.starLabel,
+        onTap: widget.onToggleFavorite,
+        excludeSemantics: true,
+        child: NymTooltip(
+          message: widget.starLabel,
+          excludeFromSemantics: true,
+          child: child,
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          color: _hover
+              ? (c.isLight
+                  ? Colors.black.withValues(alpha: 0.05)
+                  : Colors.white.withValues(alpha: 0.08))
+              : null,
+          padding: const EdgeInsets.fromLTRB(14, 7, 8, 7),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      widget.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _hover ? c.textBright : c.text,
+                        fontSize: 13,
+                      ),
+                    ),
+                    if (widget.subtitle.isNotEmpty)
+                      Text(
+                        widget.subtitle,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: c.textDim, fontSize: 10),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              _star(MouseRegion(
+                cursor: SystemMouseCursors.click,
+                onEnter: (_) => setState(() => _starHover = true),
+                onExit: (_) => setState(() => _starHover = false),
+                child: GestureDetector(
+                  onTap: widget.onToggleFavorite,
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      // No explicit light override in the CSS; matches the row hover.
+                      color: _starHover
+                          ? (c.isLight
+                              ? Colors.black.withValues(alpha: 0.06)
+                              : Colors.white.withValues(alpha: 0.1))
+                          : null,
+                      borderRadius: NymRadius.rsm,
+                    ),
+                    child: NymSvgIcon(
+                      widget.favorited
+                          ? NymIcons.starFilled
+                          : NymIcons.starOutline,
+                      size: 14,
+                      color: widget.favorited
+                          ? _favColor
+                          : (_starHover ? c.textBright : c.textDim),
+                    ),
+                  ),
+                ),
+              )),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Sentinels are allocated upward from U+E000 within the BMP Private Use Area.
+const int _kSentinelBase = 0xE000;
+const int _kSentinelEnd = 0xF8FF;
+
+final RegExp _rxSentinel = RegExp('[\u{E000}-\u{F8FF}]', unicode: true);
+
+/// A completed `:code:` token (NIP-30 codes are `[a-zA-Z0-9_+-]+`).
+final RegExp _rxShortcodeToken = RegExp(r':([a-zA-Z0-9_+\-]+):');
+
+/// Renders each custom emoji or mention as one PUA char painted via WidgetSpan; [expand] restores the wire form.
+class EmojiSentinelController extends TextEditingController {
+  EmojiSentinelController({super.text});
+
+  /// Shortcode to image URL; decides which `:code:`s resolve and what a sentinel paints.
+  Map<String, String> _codeToUrl = const {};
+  set codeToUrl(Map<String, String> value) {
+    if (identical(_codeToUrl, value)) return;
+    _codeToUrl = value;
+    // Repaint so a sentinel whose URL just arrived gets its image; no text mutation.
+    notifyListeners();
+  }
+
+  /// One sentinel per distinct shortcode, reused across occurrences.
+  final Map<String, String> _sentinelToCode = {};
+  final Map<String, String> _codeToSentinel = {};
+
+  /// Mentions use the same technique: one sentinel per distinct mention, expanded to `@base#suffix`.
+  final Map<String, _MentionSentinel> _sentinelToMention = {};
+  final Map<String, String> _mentionToSentinel = {};
+  int _nextSentinel = _kSentinelBase;
+
+  /// Null only when the PUA space is exhausted; the caller then leaves the literal text.
+  String? _sentinelFor(String code) {
+    final existing = _codeToSentinel[code];
+    if (existing != null) return existing;
+    if (_nextSentinel > _kSentinelEnd) return null;
+    final ch = String.fromCharCode(_nextSentinel++);
+    _codeToSentinel[code] = ch;
+    _sentinelToCode[ch] = code;
+    return ch;
+  }
+
+  /// Null when the PUA space is exhausted, so the caller inserts the literal `@fullNym`.
+  String? mentionSentinel({required String fullNym, required String pubkey}) {
+    final existing = _mentionToSentinel[fullNym];
+    if (existing != null) return existing;
+    if (_nextSentinel > _kSentinelEnd) return null;
+    final ch = String.fromCharCode(_nextSentinel++);
+    _mentionToSentinel[fullNym] = ch;
+    _sentinelToMention[ch] = _MentionSentinel(fullNym: fullNym, pubkey: pubkey);
+    return ch;
+  }
+
+  /// Wire-safety primitive: maps every sentinel back to `:shortcode:` or `@base#suffix`.
+  String expand(String input) {
+    if (input.isEmpty ||
+        (_sentinelToCode.isEmpty && _sentinelToMention.isEmpty)) {
+      return input;
+    }
+    return input.replaceAllMapped(_rxSentinel, (m) {
+      final ch = m[0]!;
+      final code = _sentinelToCode[ch];
+      if (code != null) return ':$code:';
+      final mention = _sentinelToMention[ch];
+      if (mention != null) return '@${mention.fullNym}';
+      return ch;
+    });
+  }
+
+  /// Replaces completed known `:code:`s with sentinels, shifting the selection; null when unchanged.
+  TextEditingValue? resolveValue(TextEditingValue value) {
+    final src = value.text;
+    if (src.isEmpty || !src.contains(':')) return null;
+    final sb = StringBuffer();
+    var last = 0;
+    var changed = false;
+    // A `:code:` of length N collapses to 1, so later offsets shift by -(N-1).
+    var base = value.selection.baseOffset;
+    var extent = value.selection.extentOffset;
+    for (final m in _rxShortcodeToken.allMatches(src)) {
+      final code = m.group(1)!;
+      if (!_codeToUrl.containsKey(code)) continue; // Unknown codes stay literal.
+      final ch = _sentinelFor(code);
+      if (ch == null) continue; // PUA exhausted: leave literal.
+      sb.write(src.substring(last, m.start));
+      sb.write(ch);
+      last = m.end;
+      changed = true;
+      final delta = (m.end - m.start) - 1;
+      base = _shiftOffset(base, m.start, m.end, delta);
+      extent = _shiftOffset(extent, m.start, m.end, delta);
+    }
+    if (!changed) return null;
+    sb.write(src.substring(last));
+    final out = sb.toString();
+    final maxOffset = out.length;
+    return TextEditingValue(
+      text: out,
+      selection: TextSelection(
+        baseOffset: base.clamp(-1, maxOffset),
+        extentOffset: extent.clamp(-1, maxOffset),
+      ),
+      composing: TextRange.empty,
+    );
+  }
+
+  /// After the run shift left by delta; inside clamp to just past the sentinel; before unchanged.
+  static int _shiftOffset(int offset, int start, int end, int delta) {
+    if (offset < 0) return offset;
+    if (offset >= end) return offset - delta;
+    if (offset > start) return start + 1;
+    return offset;
+  }
+
+  /// Applies [resolveValue] in place after every edit.
+  void resolveInput() {
+    final next = resolveValue(value);
+    if (next != null) value = next;
+  }
+
+  @override
+  void clear() {
+    _resetSentinels();
+    super.clear();
+  }
+
+  @override
+  set value(TextEditingValue newValue) {
+    // Drop sentinel allocations when the draft empties so stale mappings can't leak.
+    if (newValue.text.isEmpty &&
+        (_sentinelToCode.isNotEmpty || _sentinelToMention.isNotEmpty)) {
+      _resetSentinels();
+    }
+    super.value = newValue;
+  }
+
+  void _resetSentinels() {
+    _sentinelToCode.clear();
+    _codeToSentinel.clear();
+    _sentinelToMention.clear();
+    _mentionToSentinel.clear();
+    _nextSentinel = _kSentinelBase;
+  }
+
+  /// Markers follow the caret, and an unfocused field has no caret, so they stay hidden.
+  bool get composerFocused => _composerFocused;
+  bool _composerFocused = false;
+  set composerFocused(bool value) {
+    if (_composerFocused == value) return;
+    _composerFocused = value;
+    notifyListeners();
+  }
+
+  /// Markdown and sentinels are painted while the spans cover the draft char for char, keeping offsets valid.
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    final src = text;
+    final hasSentinel = (_sentinelToCode.isNotEmpty ||
+            _sentinelToMention.isNotEmpty) &&
+        _rxSentinel.hasMatch(src);
+    // Never restyle mid-composition; the IME's composing underline must stay intact.
+    final composing =
+        withComposing && value.composing.isValid && !value.composing.isCollapsed;
+    final runs = composing ? const <RichRun>[] : parseRichFormat(src);
+    final formatted = hasRichFormat(runs);
+    if (!hasSentinel && !formatted) {
+      return super.buildTextSpan(
+          context: context, style: style, withComposing: withComposing);
+    }
+    final baseStyle = style ?? const TextStyle();
+    final children = <InlineSpan>[];
+    if (formatted) {
+      final sel = value.selection;
+      final caret = _composerFocused && sel.isValid ? sel : null;
+      _emitRuns(
+        runs: runs,
+        src: src,
+        style: baseStyle,
+        fieldStyle: baseStyle,
+        colors: context.nym,
+        caretStart: caret?.start ?? -1,
+        caretEnd: caret?.end ?? -1,
+        out: children,
+      );
+    } else {
+      _emitPlain(src, 0, src.length, baseStyle, children);
+    }
+    return TextSpan(style: baseStyle, children: children);
+  }
+
+  void _emitRuns({
+    required List<RichRun> runs,
+    required String src,
+    required TextStyle style,
+    required TextStyle fieldStyle,
+    required NymColors colors,
+    required int caretStart,
+    required int caretEnd,
+    required List<InlineSpan> out,
+  }) {
+    for (final run in runs) {
+      if (run.isText) {
+        _emitPlain(src, run.start, run.end, style, out);
+        continue;
+      }
+      final revealed = run.revealedAt(caretStart, caretEnd);
+      final inner = richRunStyle(style, run.type, colors);
+      final mark = richMarkStyle(inner, fieldStyle, revealed, colors,
+          keepSpace: run.emptyBody);
+      if (run.type == 'timestamp') {
+        final seconds = int.tryParse(
+            RegExp(r'^<t:(-?\d+)').firstMatch(run.open)?.group(1) ?? '');
+        final styleLetter =
+            RegExp(r':([tTdDfFR])>$').firstMatch(run.open)?.group(1) ?? 'f';
+        if (seconds != null) {
+          out.add(WidgetSpan(
+            alignment: PlaceholderAlignment.baseline,
+            baseline: TextBaseline.alphabetic,
+            child: TimestampChip(
+                seconds: seconds, style: styleLetter, textStyle: style),
+          ));
+          out.add(TextSpan(text: run.open.substring(1), style: mark));
+          continue;
+        }
+      }
+      if (run.type == 'ulist' || run.type == 'ulist2') {
+        final markerAt = run.open.indexOf(RegExp(r'[-*]'));
+        out.add(TextSpan(text: run.open.substring(0, markerAt), style: style));
+        out.add(run.type == 'ulist2'
+            ? WidgetSpan(
+                alignment: PlaceholderAlignment.middle,
+                child: HollowBullet(
+                  color: colors.textDim,
+                  fontSize: style.fontSize ?? 14,
+                ),
+              )
+            : WidgetSpan(
+                alignment: PlaceholderAlignment.baseline,
+                baseline: TextBaseline.alphabetic,
+                child: Text('\u2022',
+                    style: style.copyWith(color: colors.textDim)),
+              ));
+        out.add(TextSpan(text: run.open.substring(markerAt + 1), style: style));
+      } else if (run.open.isNotEmpty) {
+        out.add(TextSpan(text: run.open, style: mark));
+      }
+      _emitRuns(
+        runs: run.children,
+        src: src,
+        style: inner,
+        fieldStyle: fieldStyle,
+        colors: colors,
+        caretStart: caretStart,
+        caretEnd: caretEnd,
+        out: out,
+      );
+      if (run.close.isNotEmpty) {
+        out.add(TextSpan(text: run.close, style: mark));
+      }
+    }
+  }
+
+  void _emitPlain(String src, int from, int to, TextStyle baseStyle,
+      List<InlineSpan> children) {
+    if (to <= from) return;
+    final side = (baseStyle.fontSize ?? 14) * 1.4;
+    final buf = StringBuffer();
+
+    void flushText() {
+      if (buf.isEmpty) return;
+      children.add(TextSpan(text: buf.toString(), style: baseStyle));
+      buf.clear();
+    }
+
+    for (final rune in src.substring(from, to).runes) {
+      final isSentinel = rune >= _kSentinelBase && rune <= _kSentinelEnd;
+      final chStr = isSentinel ? String.fromCharCode(rune) : null;
+      final code = chStr == null ? null : _sentinelToCode[chStr];
+      final url = code == null ? null : _codeToUrl[code];
+      final mention = chStr == null ? null : _sentinelToMention[chStr];
+      if ((code == null || url == null) && mention == null) {
+        // An emoji sentinel without a URL renders its literal `:code:`, never a bare PUA glyph.
+        buf.write(code != null ? ':$code:' : String.fromCharCode(rune));
+        continue;
+      }
+      flushText();
+      if (mention != null) {
+        children.add(WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: _InputMentionChip(
+            pubkey: mention.pubkey,
+            fullNym: mention.fullNym,
+            baseStyle: baseStyle,
+          ),
+        ));
+        continue;
+      }
+      children.add(WidgetSpan(
+        alignment: PlaceholderAlignment.baseline,
+        baseline: TextBaseline.alphabetic,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 1),
+          child: EmojiBaselineDrop(
+            drop: (baseStyle.fontSize ?? 14) * 0.3,
+            child: InlineNetworkImage(
+              url: proxiedMedia(url!, emoji: true),
+              width: side,
+              height: side,
+              fit: BoxFit.contain,
+              retryOnError: true,
+              errorChild: Text(':$code:', style: baseStyle),
+            ),
+          ),
+        ),
+      ));
+    }
+    flushText();
+  }
+}
+
+class _MentionSentinel {
+  const _MentionSentinel({required this.fullNym, required this.pubkey});
+  final String fullNym;
+  final String pubkey;
+}
+
+/// Inline mention chip for a mention sentinel; watches the user so late profiles fill in place.
+class _InputMentionChip extends ConsumerWidget {
+  const _InputMentionChip({
+    required this.pubkey,
+    required this.fullNym,
+    required this.baseStyle,
+  });
+
+  final String pubkey;
+
+  final String fullNym;
+  final TextStyle baseStyle;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.nym;
+    final split = splitNymSuffix(fullNym);
+    final base = split.base;
+    final suffix = split.suffix; // Includes the leading '#'.
+    final size = baseStyle.fontSize ?? 14;
+    final picture =
+        ref.watch(usersProvider.select((m) => m[pubkey]?.profile?.picture));
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        NymAvatar(seed: pubkey, size: size, imageUrl: picture),
+        const SizedBox(width: 3),
+        Text.rich(
+          TextSpan(
+            style: baseStyle,
+            children: [
+              TextSpan(text: '@$base'),
+              if (suffix.isNotEmpty)
+                TextSpan(
+                  text: suffix,
+                  style: nymSuffixStyleOf(context,
+                      baseStyle.copyWith(color: baseStyle.color ?? c.text)),
+                ),
+            ],
+          ),
+        ),
+        CosmeticNymBadges(
+          cosmetics: ref.watch(userCosmeticsProvider(pubkey)),
+          flairSize: size,
+          supporterHeight: size,
+        ),
+      ],
+    );
+  }
+}
+
+class _ComposerConnHint extends ConsumerStatefulWidget {
+  const _ComposerConnHint(
+      {required this.phone, required this.anchor, required this.onBuilt});
+
+  final bool phone;
+  final GlobalKey anchor;
+  final VoidCallback onBuilt;
+
+  @override
+  ConsumerState<_ComposerConnHint> createState() => _ComposerConnHintState();
+}
+
+class _ComposerConnHintState extends ConsumerState<_ComposerConnHint> {
+  final ConnNoticeTimer _grace = ConnNoticeTimer();
+
+  @override
+  void dispose() {
+    _grace.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final phone = widget.phone;
+    final anchor = widget.anchor;
+    final open = ref.watch(appStateProvider.select((s) => s.relayLinked));
+    final view = ref.watch(appStateProvider.select((s) => s.view));
+    ref.watch(meshControllerProvider);
+    ref.watch(connNoticeGateProvider);
+    final gate = ref.read(connNoticeGateProvider.notifier);
+    final bridge = ref.read(meshControllerProvider.notifier).bridge;
+    final text = ComposerConnStrings.forState(gate.show(composerConnState(
+      relayOpen: open,
+      meshCarries: bridge?.shouldSendOverMesh(view) ?? false,
+      deviceOffline: false,
+      connectFailed: composerConnectFailedFor(
+          everConnected: gate.everConnected, statusFailed: false),
+    )));
+    _grace.wait(gate, () => mounted);
+    widget.onBuilt();
+    if (text.isEmpty) {
+      return const Positioned(top: 0, left: 0, child: SizedBox.shrink());
+    }
+    final c = context.nym;
+    return Positioned(
+      left: phone ? 10 : 16,
+      right: phone ? 10 : 16,
+      top: 0,
+      child: IgnorePointer(
+        child: FractionalTranslation(
+          translation: const Offset(0, -1),
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: KeyedSubtree(
+                key: anchor,
+                child: Container(
+                key: const ValueKey('composerConnHint'),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                decoration: BoxDecoration(
+                  color: c.bgTertiary,
+                  border: Border.all(color: c.glassBorder),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    tr(text),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: c.textDim, fontSize: 12, height: 1.35),
+                  ),
+                ),
+              ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ToolbarEntrance extends StatelessWidget {
+  const _ToolbarEntrance({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: MediaQuery.of(context).disableAnimations
+          ? Duration.zero
+          : const Duration(milliseconds: 180),
+      curve: Curves.ease,
+      builder: (context, t, child) => Opacity(
+        opacity: t,
+        child: Transform.translate(
+          offset: Offset(0, 6 * (1 - t)),
+          child: child,
+        ),
+      ),
+      child: child,
+    );
+  }
+}

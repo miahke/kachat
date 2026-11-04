@@ -1,0 +1,714 @@
+import '../qwdtt/qwdtt_controller.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+
+import '../../core/utils/peer_connection_release.dart';
+import '../share/share_origin.dart';
+import 'p2p_models.dart';
+
+/// Relay transport for plain (not gift-wrapped) p-tagged kind-25051/25052 events; implemented by NostrController.
+abstract class P2PTransport {
+  String get selfPubkey;
+
+  /// Publishes a plain event signed with the local identity.
+  Future<void> publishP2P({
+    required int kind,
+    required List<List<String>> tags,
+    required String content,
+  });
+
+  /// Subscribes to kind-25051/25052 events p-tagged to us; the returned callback unsubscribes.
+  void Function() subscribeP2P(
+    void Function(String senderPubkey, int kind, String content) onEvent,
+  );
+}
+
+/// One side of a peer connection keyed by `peerPubkey-transferId`.
+class _P2PConnection {
+  _P2PConnection(this.pc);
+  final RTCPeerConnection pc;
+  RTCDataChannel? channel;
+  bool haveRemote = false;
+  final List<RTCIceCandidate> pending = [];
+
+  /// 30s establish timeout; a transfer stuck connecting is errored and cleaned up.
+  Timer? connectTimeout;
+
+  /// 5s grace after `disconnected` before declaring the connection lost.
+  Timer? disconnectGrace;
+}
+
+/// Direct WebRTC data-channel file sharing; the PWA's optional WebTorrent route is intentionally not ported.
+class P2PService extends ChangeNotifier {
+  P2PService(this._transport) { QwdttController.instance.registerNativeGuard(_closeForQwdtt); }
+
+  @visibleForTesting
+  static Future<RTCPeerConnection> Function(Map<String, dynamic> config)?
+      peerConnectionFactory;
+
+  final P2PTransport _transport;
+  void Function()? _unsub;
+
+  /// Files we are seeding, by offerId.
+  final Map<String, Uint8List> _pendingFiles = {};
+
+  /// Known offers (ours and peers'), by offerId.
+  final Map<String, FileOffer> _offers = {};
+
+  final Map<String, P2PTransfer> _transfers = {};
+
+  final Map<String, _P2PConnection> _connections = {};
+
+  final Map<String, List<Uint8List>> _received = {};
+
+  /// Offers the seeder has stopped serving.
+  final Set<String> _unseeded = {};
+
+  void Function(String message)? onSystemMessage;
+
+  bool Function(String pubkey)? peerHidden;
+
+  /// Completed-download sink; unset saves to disk and opens the share sheet so the file always lands somewhere.
+  void Function(String filename, Uint8List bytes)? onDownloadReady;
+
+  List<P2PTransfer> get transfers => _transfers.values.toList(growable: false);
+  Map<String, FileOffer> get seeding => {
+        for (final id in _pendingFiles.keys)
+          if (_offers[id] != null) id: _offers[id]!,
+      };
+  bool isUnseeded(String offerId) => _unseeded.contains(offerId);
+  FileOffer? offer(String offerId) => _offers[offerId];
+
+  /// Begins listening for inbound signaling and status; idempotent.
+  void start() {
+    _unsub ??= _transport.subscribeP2P(_onSignalEvent);
+  }
+
+  @override
+  void dispose() {
+    QwdttController.instance.unregisterNativeGuard(_closeForQwdtt);
+    _unsub?.call();
+    for (final c in _connections.values) {
+      c.connectTimeout?.cancel();
+      c.disconnectGrace?.cancel();
+      try {
+        c.channel?.close();
+      } catch (_) {}
+      unawaited(releasePeerConnection(c.pc));
+    }
+    _connections.clear();
+    super.dispose();
+  }
+
+  /// Hashes and registers a [FileOffer] for seeding; the caller announces it with an `['offer', JSON]` tag.
+  FileOffer shareFile({
+    required Uint8List bytes,
+    required String name,
+    required String type,
+  }) {
+    final offer = FileOffer.fromBytes(
+      bytes: bytes,
+      name: name,
+      type: type,
+      seederPubkey: _transport.selfPubkey,
+    );
+    _pendingFiles[offer.offerId] = bytes;
+    _offers[offer.offerId] = offer;
+    notifyListeners();
+    return offer;
+  }
+
+  /// Registers a peer's offer and starts signaling so the offer card is live on render.
+  void registerOffer(FileOffer offer) {
+    _offers[offer.offerId] = offer;
+    start();
+    notifyListeners();
+  }
+
+  /// Creates the transfer state and the initiating WebRTC connection.
+  Future<void> requestFile(String offerId) async {
+    // A pure receiver may never have shared a file, so start signaling or the seeder's answer never arrives.
+    start();
+    final offer = _offers[offerId];
+    if (offer == null) {
+      _system('File offer not found');
+      return;
+    }
+    if (offer.seederPubkey == _transport.selfPubkey) {
+      _system('Cannot download your own file');
+      return;
+    }
+    if (peerHidden?.call(offer.seederPubkey) == true) return;
+    if (_unseeded.contains(offerId)) {
+      _system('This file is no longer being seeded by the owner');
+      return;
+    }
+    final transferId =
+        '$offerId-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}';
+    _transfers[transferId] = P2PTransfer(
+      transferId: transferId,
+      offerId: offerId,
+      offer: offer,
+      startTime: DateTime.now().millisecondsSinceEpoch,
+    );
+    _received[transferId] = [];
+    notifyListeners();
+    await _createConnection(offer.seederPubkey, transferId, true);
+  }
+
+  Future<void> stopSeeding(String offerId,
+      {String? geohash, String? channelName}) async {
+    final offer = _offers[offerId];
+    _pendingFiles.remove(offerId);
+    _unseeded.add(offerId);
+    // Cancel active transfers for this offer.
+    for (final id in _transfers.keys
+        .where((id) => _transfers[id]!.offerId == offerId)
+        .toList()) {
+      cancelTransfer(id, silent: true);
+    }
+    if (offer != null) {
+      final payload = buildUnseededPayload(
+          offer: offer, geohash: geohash, channelName: channelName);
+      try {
+        await _transport.publishP2P(
+          kind: P2PConstants.fileStatusKind,
+          tags: payload.tags,
+          content: payload.content,
+        );
+      } catch (e) {
+        debugPrint('P2P unseeded broadcast failed: $e');
+      }
+    }
+    _system('Stopped seeding file${offer != null ? ': ${offer.name}' : ''}');
+    notifyListeners();
+  }
+
+  String _peerOf(String transferId) {
+    for (final id in _connections.keys) {
+      if (id.endsWith('-$transferId')) {
+        return id.substring(0, id.length - transferId.length - 1);
+      }
+    }
+    final t = _transfers[transferId];
+    if (t != null && !t.isOutgoing) return t.offer.seederPubkey;
+    return '';
+  }
+
+  bool _transferPeerHidden(String transferId) {
+    final peer = _peerOf(transferId);
+    return peer.isNotEmpty &&
+        peer != _transport.selfPubkey &&
+        peerHidden?.call(peer) == true;
+  }
+
+  void _dropTransfer(String transferId) {
+    _transfers.remove(transferId);
+    _received.remove(transferId);
+    for (final id in _connections.keys
+        .where((id) => id.endsWith('-$transferId'))
+        .toList()) {
+      _cleanupConnection(id);
+    }
+  }
+
+  void refreshForFilters() {
+    final drop = <String>{};
+    for (final id in _connections.keys) {
+      if (id.length > 65 && id[64] == '-') {
+        final peer = id.substring(0, 64);
+        if (peer != _transport.selfPubkey && peerHidden?.call(peer) == true) {
+          drop.add(id.substring(65));
+        }
+      }
+    }
+    for (final e in _transfers.entries) {
+      if (_transferPeerHidden(e.key)) drop.add(e.key);
+    }
+    if (drop.isEmpty) return;
+    for (final id in drop) {
+      _dropTransfer(id);
+    }
+    notifyListeners();
+  }
+
+  Future<void> _closeForQwdtt() async {
+    final peers = _connections.values.map((c) => c.pc).toList();
+    for (final id in _transfers.keys.toList()) { cancelTransfer(id, silent: true); }
+    for (final id in _connections.keys.toList()) { _cleanupConnection(id); }
+    await Future.wait(peers.map(releasePeerConnection));
+  }
+
+  void cancelTransfer(String transferId, {bool silent = false}) {
+    final transfer = _transfers.remove(transferId);
+    _received.remove(transferId);
+    for (final id
+        in _connections.keys.where((id) => id.endsWith(transferId)).toList()) {
+      _cleanupConnection(id);
+    }
+    if (transfer != null && !silent) _system('Transfer canceled');
+    notifyListeners();
+  }
+
+  void _onSignalEvent(String senderPubkey, int kind, String content) {
+    if (senderPubkey.isEmpty || peerHidden?.call(senderPubkey) == true) return;
+    if (kind == P2PConstants.fileStatusKind) {
+      try {
+        final data = jsonDecode(content);
+        if (data is Map &&
+            data['status'] == 'unseeded' &&
+            data['offerId'] != null) {
+          final offerId = data['offerId'].toString();
+          final offer = _offers[offerId];
+          if (offer == null ||
+              senderPubkey.isEmpty ||
+              offer.seederPubkey != senderPubkey) {
+            return;
+          }
+          _unseeded.add(offerId);
+          notifyListeners();
+        }
+      } catch (_) {}
+      return;
+    }
+    if (kind != P2PConstants.signalingKind) return;
+    try {
+      final data = jsonDecode(content);
+      if (data is! Map<String, dynamic>) return;
+      switch (data['type']) {
+        case 'offer':
+          _handleOffer(senderPubkey, data);
+        case 'answer':
+          _handleAnswer(senderPubkey, data);
+        case 'ice-candidate':
+          _handleIce(senderPubkey, data);
+      }
+    } catch (e) {
+      debugPrint('P2P signaling error: $e');
+    }
+  }
+
+  Future<_P2PConnection> _createConnection(
+      String peerPubkey, String transferId, bool isInitiator) async {
+    if (!QwdttController.instance.nativeNetworkAllowed) throw StateError('P2P WebRTC недоступен при выбранном qWDTT');
+    final connectionId = '$peerPubkey-$transferId';
+    final config = <String, dynamic>{'iceServers': P2PConstants.iceServers};
+    final factory = peerConnectionFactory;
+    final pc = factory != null
+        ? await factory(config)
+        : await createPeerConnection(config);
+    if (!QwdttController.instance.nativeNetworkAllowed) { await releasePeerConnection(pc); throw StateError('P2P blocked by qWDTT'); }
+    final conn = _P2PConnection(pc);
+    _connections[connectionId] = conn;
+
+    pc.onIceCandidate = (c) {
+      // Skip the empty end-of-gathering marker flutter_webrtc emits.
+      if (c.candidate == null || c.candidate!.isEmpty) return;
+      final sig = iceSignal(candidate: {
+        'candidate': c.candidate,
+        'sdpMid': c.sdpMid,
+        'sdpMLineIndex': c.sdpMLineIndex,
+      }, transferId: transferId);
+      _sendSignal(peerPubkey, sig);
+    };
+
+    pc.onIceConnectionState = (s) {
+      final transfer = _transfers[transferId];
+      if (s == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        conn.connectTimeout?.cancel();
+        if (transfer != null) {
+          _updateStatus(transferId, P2PStatus.error,
+              'Connection failed - peer may be offline');
+        }
+        _cleanupConnection(connectionId);
+      } else if (s == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        // Give it a moment to recover before declaring error.
+        conn.disconnectGrace?.cancel();
+        conn.disconnectGrace = Timer(const Duration(seconds: 5), () {
+          final st = conn.pc.iceConnectionState;
+          if (st == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
+              st == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+            final t = _transfers[transferId];
+            if (t != null && t.status != P2PStatus.complete) {
+              _updateStatus(transferId, P2PStatus.error, 'Connection lost');
+            }
+            _cleanupConnection(connectionId);
+          }
+        });
+      } else if (s == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          s == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        conn.connectTimeout?.cancel();
+        conn.disconnectGrace?.cancel();
+        if (transfer != null && transfer.status == P2PStatus.connecting) {
+          transfer.status = P2PStatus.transferring;
+          notifyListeners();
+        }
+      }
+    };
+
+    // Peer offline or no answer: error out and tear down after 30s.
+    conn.connectTimeout = Timer(const Duration(seconds: 30), () {
+      final t = _transfers[transferId];
+      if (t != null && t.status == P2PStatus.connecting) {
+        _updateStatus(transferId, P2PStatus.error,
+            'Connection timed out - peer may be offline');
+        _cleanupConnection(connectionId);
+      }
+    });
+
+    if (isInitiator) {
+      // The receiver opens the data channel to pull the file.
+      final dc = await pc.createDataChannel(
+          'fileTransfer', RTCDataChannelInit()..ordered = true);
+      conn.channel = dc;
+      _setupDataChannel(dc, transferId, isSender: false);
+
+      final offerDesc = await pc.createOffer();
+      await pc.setLocalDescription(offerDesc);
+      final transfer = _transfers[transferId];
+      _sendSignal(
+        peerPubkey,
+        offerSignal(
+          sdp: {'type': offerDesc.type, 'sdp': offerDesc.sdp},
+          transferId: transferId,
+          offerId: transfer?.offerId ?? '',
+        ),
+      );
+    } else {
+      pc.onDataChannel = (dc) {
+        conn.channel = dc;
+        _setupDataChannel(dc, transferId, isSender: true);
+      };
+    }
+    return conn;
+  }
+
+  void _setupDataChannel(RTCDataChannel dc, String transferId,
+      {required bool isSender}) {
+    dc.onDataChannelState = (state) {
+      if (state == RTCDataChannelState.RTCDataChannelOpen) {
+        if (isSender) {
+          unawaited(_startSending(transferId, dc));
+        } else {
+          _updateStatus(transferId, P2PStatus.transferring, 'Receiving...');
+        }
+      } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
+        final t = _transfers[transferId];
+        if (t != null &&
+            t.status != P2PStatus.complete &&
+            t.status != P2PStatus.error) {
+          _updateStatus(transferId, P2PStatus.error, 'Connection closed');
+        }
+      }
+    };
+    dc.onMessage = (msg) {
+      if (!isSender) _handleChunk(transferId, msg);
+    };
+  }
+
+  /// Sends metadata JSON, then 16 KiB chunks with backpressure, then `{type:'complete'}`.
+  Future<void> _startSending(String transferId, RTCDataChannel dc) async {
+    final transfer = _transfers[transferId];
+    if (transfer == null) return;
+    if (_transferPeerHidden(transferId)) {
+      _dropTransfer(transferId);
+      notifyListeners();
+      return;
+    }
+    final bytes = _pendingFiles[transfer.offerId];
+    if (bytes == null) {
+      try {
+        await dc.send(RTCDataChannelMessage(jsonEncode(
+            {'type': 'error', 'message': 'File no longer available'})));
+      } catch (_) {}
+      _updateStatus(transferId, P2PStatus.error, 'File no longer available');
+      return;
+    }
+
+    await dc.send(RTCDataChannelMessage(jsonEncode({
+      'type': 'metadata',
+      'name': transfer.offer.name,
+      'size': transfer.offer.size,
+      'mimeType': transfer.offer.type,
+    })));
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final chunks = chunkBytes(bytes);
+    for (final chunk in chunks) {
+      if (!_transfers.containsKey(transferId) ||
+          _transferPeerHidden(transferId)) {
+        _dropTransfer(transferId);
+        notifyListeners();
+        return;
+      }
+      if (dc.state != RTCDataChannelState.RTCDataChannelOpen) {
+        _updateStatus(
+            transferId, P2PStatus.error, 'Connection closed during transfer');
+        return;
+      }
+      // Pause above the high-water mark and poll until below low-water.
+      var guard = 0;
+      while ((await _bufferedAmount(dc)) > P2PConstants.highWater &&
+          guard++ < 1000) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        if (dc.state != RTCDataChannelState.RTCDataChannelOpen) return;
+      }
+      await dc.send(RTCDataChannelMessage.fromBinary(chunk));
+      transfer.bytesSent += chunk.length;
+      notifyListeners();
+    }
+
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    try {
+      await dc.send(RTCDataChannelMessage(jsonEncode({'type': 'complete'})));
+    } catch (_) {}
+    transfer.status = P2PStatus.complete;
+    notifyListeners();
+  }
+
+  Future<int> _bufferedAmount(RTCDataChannel dc) async {
+    try {
+      return dc.bufferedAmount ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Accumulates chunks and verifies size and SHA-256 on `complete`.
+  void _handleChunk(String transferId, RTCDataChannelMessage msg) {
+    final transfer = _transfers[transferId];
+    if (transfer == null) return;
+    if (_transferPeerHidden(transferId)) {
+      _dropTransfer(transferId);
+      notifyListeners();
+      return;
+    }
+
+    if (!msg.isBinary) {
+      try {
+        final data = jsonDecode(msg.text);
+        if (data is Map) {
+          if (data['type'] == 'metadata') {
+            transfer.message = 'Receiving ${data['name']}';
+            notifyListeners();
+          } else if (data['type'] == 'complete') {
+            _complete(transferId);
+          } else if (data['type'] == 'error') {
+            _updateStatus(transferId, P2PStatus.error,
+                data['message']?.toString() ?? 'Transfer error');
+          }
+        }
+      } catch (_) {}
+      return;
+    }
+
+    final bin = msg.binary;
+    final chunks = _received[transferId];
+    if (chunks == null) return;
+    final newTotal = transfer.bytesReceived + bin.length;
+    if (newTotal > P2PConstants.maxFileSize) {
+      _abort(transferId, 'Transfer aborted: file exceeds maximum allowed size');
+      return;
+    }
+    if (newTotal > transfer.offer.size) {
+      _abort(
+          transferId, 'Transfer aborted: received more data than advertised');
+      return;
+    }
+    chunks.add(bin);
+    transfer.bytesReceived += bin.length;
+    // Progress percent (clamped to 100) and throughput since the transfer started.
+    if (transfer.offer.size > 0) {
+      final pct =
+          ((transfer.bytesReceived / transfer.offer.size) * 100).clamp(0, 100);
+      final elapsed =
+          (DateTime.now().millisecondsSinceEpoch - transfer.startTime) / 1000;
+      final speed = elapsed > 0 ? transfer.bytesReceived / elapsed : 0;
+      transfer.message =
+          '${pct.toStringAsFixed(1)}% • ${formatFileSize(speed.round())}/s';
+    }
+    notifyListeners();
+  }
+
+  void _complete(String transferId) {
+    final transfer = _transfers[transferId];
+    final chunks = _received[transferId];
+    if (transfer == null || chunks == null) return;
+    final offer = transfer.offer;
+
+    if (transfer.bytesReceived != offer.size) {
+      _abort(transferId,
+          'Transfer rejected: received size does not match advertised size');
+      return;
+    }
+    final bytes = reassembleChunks(chunks);
+    if (offer.hash.isNotEmpty) {
+      final got = sha256Hex(bytes);
+      if (got != offer.hash.toLowerCase()) {
+        _abort(transferId,
+            'Transfer rejected: file content does not match advertised hash');
+        return;
+      }
+    }
+    _updateStatus(transferId, P2PStatus.complete, 'Download complete!');
+    _received.remove(transferId);
+    final safeName = sanitizeDownloadFilename(offer.name);
+    final handler = onDownloadReady;
+    if (handler != null) {
+      handler(safeName, bytes);
+    } else {
+      // No host save handler: persist and offer the OS share sheet.
+      unawaited(_saveDownload(safeName, bytes));
+    }
+    _system('File "${offer.name}" downloaded successfully');
+  }
+
+  /// Writes a temp file and opens the OS share sheet; failures only surface a system message.
+  Future<void> _saveDownload(String filename, Uint8List bytes) async {
+    try {
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/$filename';
+      final file = File(path);
+      await file.writeAsBytes(bytes, flush: true);
+      await SharePlus.instance.share(ShareParams(
+          files: [XFile(path)], subject: filename, sharePositionOrigin: shareOriginOf(null)));
+    } catch (e) {
+      debugPrint('P2P save download failed: $e');
+      _system('Downloaded "$filename" but could not open the save dialog');
+    }
+  }
+
+  void _abort(String transferId, String message) {
+    _updateStatus(transferId, P2PStatus.error, message);
+    _received.remove(transferId);
+    for (final id
+        in _connections.keys.where((id) => id.endsWith(transferId)).toList()) {
+      _cleanupConnection(id);
+    }
+    _system(message);
+  }
+
+  Future<void> _handleOffer(
+      String senderPubkey, Map<String, dynamic> data) async {
+    final offerId = data['offerId']?.toString() ?? '';
+    final transferId = data['transferId']?.toString() ?? '';
+    if (!_pendingFiles.containsKey(offerId)) return; // we don't have this file
+    final fileOffer = _offers[offerId];
+    if (fileOffer == null || fileOffer.seederPubkey != _transport.selfPubkey) {
+      return;
+    }
+    _transfers[transferId] = P2PTransfer(
+      transferId: transferId,
+      offerId: offerId,
+      offer: fileOffer,
+      startTime: DateTime.now().millisecondsSinceEpoch,
+      isOutgoing: true,
+    );
+    notifyListeners();
+
+    final conn = await _createConnection(senderPubkey, transferId, false);
+    final sdp = data['sdp'];
+    if (sdp is Map) {
+      await conn.pc.setRemoteDescription(
+          RTCSessionDescription(sdp['sdp'] as String?, sdp['type'] as String?));
+      conn.haveRemote = true;
+      await _flushPending(conn);
+    }
+    final answer = await conn.pc.createAnswer();
+    await conn.pc.setLocalDescription(answer);
+    _sendSignal(
+      senderPubkey,
+      answerSignal(
+        sdp: {'type': answer.type, 'sdp': answer.sdp},
+        transferId: transferId,
+      ),
+    );
+  }
+
+  Future<void> _handleAnswer(
+      String senderPubkey, Map<String, dynamic> data) async {
+    final transferId = data['transferId']?.toString() ?? '';
+    final conn = _connections['$senderPubkey-$transferId'];
+    final sdp = data['sdp'];
+    if (conn != null && sdp is Map) {
+      await conn.pc.setRemoteDescription(
+          RTCSessionDescription(sdp['sdp'] as String?, sdp['type'] as String?));
+      conn.haveRemote = true;
+      await _flushPending(conn);
+    }
+  }
+
+  Future<void> _handleIce(
+      String senderPubkey, Map<String, dynamic> data) async {
+    final transferId = data['transferId']?.toString() ?? '';
+    final conn = _connections['$senderPubkey-$transferId'];
+    final c = data['candidate'];
+    if (conn == null || c is! Map) return;
+    // Drop the empty end-of-gathering marker.
+    final candStr = c['candidate'] as String?;
+    if (candStr == null || candStr.isEmpty) return;
+    final candidate = RTCIceCandidate(
+      candStr,
+      c['sdpMid'] as String?,
+      (c['sdpMLineIndex'] as num?)?.toInt(),
+    );
+    if (conn.haveRemote) {
+      try {
+        await conn.pc.addCandidate(candidate);
+      } catch (_) {}
+    } else {
+      conn.pending.add(candidate);
+    }
+  }
+
+  Future<void> _flushPending(_P2PConnection conn) async {
+    for (final c in conn.pending) {
+      try {
+        await conn.pc.addCandidate(c);
+      } catch (_) {}
+    }
+    conn.pending.clear();
+  }
+
+  void _cleanupConnection(String connectionId) {
+    final c = _connections.remove(connectionId);
+    if (c == null) return;
+    c.connectTimeout?.cancel();
+    c.disconnectGrace?.cancel();
+    try {
+      c.channel?.close();
+    } catch (_) {}
+    unawaited(releasePeerConnection(c.pc));
+  }
+
+  void _updateStatus(String transferId, P2PStatus status, String message) {
+    final t = _transfers[transferId];
+    if (t == null) return;
+    t.status = status;
+    t.message = message;
+    notifyListeners();
+  }
+
+  void _sendSignal(String targetPubkey, Map<String, dynamic> data) {
+    if (targetPubkey != _transport.selfPubkey &&
+        peerHidden?.call(targetPubkey) == true) {
+      return;
+    }
+    final payload = buildSignalPayload(targetPubkey: targetPubkey, data: data);
+    unawaited(_transport
+        .publishP2P(
+          kind: P2PConstants.signalingKind,
+          tags: payload.tags,
+          content: payload.content,
+        )
+        .catchError((Object e) => debugPrint('P2P signal publish failed: $e')));
+  }
+
+  void _system(String message) => onSystemMessage?.call(message);
+}

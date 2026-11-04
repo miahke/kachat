@@ -1,0 +1,5786 @@
+import '../../features/payments/payment_policy.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math' as math;
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
+
+import '../../core/constants/relays.dart';
+import 'row_tap.dart';
+import 'eased.dart';
+import '../../core/crypto/bech32_codec.dart' show encodeNevent;
+import '../../features/layout/layout_model.dart';
+import '../../features/toasts/toast_center.dart';
+import '../../features/toasts/toast_model.dart' show ToastKind;
+import 'event_details_sheet.dart';
+import '../../core/theme/nym_colors.dart';
+import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
+import '../../features/notifications/self_reference.dart';
+import '../../features/chat_tools/chat_tools_service.dart'
+    show chatToolsKeptLookup;
+import '../../features/chat_tools/chat_tools_ui.dart';
+import '../../features/share/share_origin.dart';
+import '../../features/autocomplete/pending_edit.dart';
+import '../../features/commands/command_i18n.dart';
+import '../../features/composer/send_as_model.dart';
+import '../../features/composer/composer_conn.dart';
+import '../../features/duo/duo_rail.dart';
+import '../../features/i18n/i18n.dart';
+import '../../features/nymbot/long_text.dart';
+import '../../features/messages/flood_tracker.dart';
+import '../../features/messages/format/message_content.dart';
+import '../../features/messages/inline_network_image.dart';
+import '../../features/settings/about_screen.dart';
+import '../../features/p2p/p2p_models.dart';
+import '../../features/p2p/p2p_service.dart';
+import '../../features/shop/cosmetics.dart';
+import '../../features/reactions/quick_context_items.dart';
+import '../../features/threads/thread_view.dart' show openMessageThread;
+import '../../features/reactions/quick_react_popup.dart';
+import '../../features/reactions/message_action_sheet.dart';
+import '../../features/reactions/hover_actions.dart';
+import '../../features/shortcuts/escape_layers.dart';
+import '../../features/reactions/message_actions.dart';
+import '../../core/utils/haptics.dart';
+import '../common/nym_sheet.dart';
+import '../../features/reactions/reaction_burst.dart';
+import 'relative_time_ticker.dart';
+import '../../features/reactions/reactors_modal.dart';
+import '../../features/emoji/emoji_data.dart';
+import '../../features/translate/translate_target.dart';
+import '../../features/translate/message_translation.dart';
+import '../../features/translate/translated_messages.dart';
+import '../../features/zaps/zap_badge.dart';
+import '../../models/message.dart';
+import '../../models/settings.dart';
+import '../../models/user.dart';
+import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
+import '../../services/relay/queued_sends.dart';
+import '../../services/storage/mesh_file_store.dart';
+import '../../state/settings_provider.dart';
+import '../common/nym_avatar.dart';
+import '../../features/accounts/account_host.dart' show accountsProvider;
+import '../nym_icons.dart';
+import 'hover_bar_controller.dart';
+import 'message_selection.dart';
+import '../../features/layout/pointer_input.dart';
+import 'bitchat_user_color.dart';
+import 'crypto_pq_badge.dart';
+import 'crypto_verified_badge.dart';
+import '../context_menu/context_menu_actions.dart';
+import '../context_menu/context_menu_panel.dart';
+import '../context_menu/interaction_hooks.dart';
+import '../context_menu/profile_badges.dart';
+import '../anchored_popup.dart';
+import '../../features/group_tools/group_tools_providers.dart';
+import '../../features/group_tools/group_tools_ui.dart';
+import '../../features/dm_polls/dm_poll_card.dart';
+import '../../features/media_notes/media_note_host.dart';
+import '../../features/media_notes/media_note_view.dart';
+import '../../features/media_notes/media_note_sender.dart';
+import '../common/nym_focusable.dart';
+import '../../features/chat_nav/chat_nav.dart';
+import '../../features/chat_nav/chat_nav_providers.dart';
+import 'composer.dart' show ComposerDrafts, composerOverhangProvider;
+import '../common/nym_tooltip.dart';
+import '../common/nym_label.dart';
+import '../../core/theme/nym_a11y.dart';
+import '../../features/emoji/emoji_block.dart';
+
+String formatTime(DateTime t, String timeFormat) {
+  final h24 = t.hour;
+  final m = t.minute.toString().padLeft(2, '0');
+  if (timeFormat == '24hr') {
+    return '${h24.toString().padLeft(2, '0')}:$m';
+  }
+  final h12 = h24 % 12 == 0 ? 12 : h24 % 12;
+  final ampm = h24 < 12 ? 'AM' : 'PM';
+  return '$h12:$m $ampm';
+}
+
+const List<String> _shortMonths = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
+/// Full "date, time" label for a tapped timestamp, honoring the time and date format settings.
+String formatFullTimestamp(DateTime t, String timeFormat, String dateFormat) {
+  final h24 = t.hour;
+  final m = t.minute.toString().padLeft(2, '0');
+  final s = t.second.toString().padLeft(2, '0');
+  final String timeStr;
+  if (timeFormat == '24hr') {
+    timeStr = '${h24.toString().padLeft(2, '0')}:$m:$s';
+  } else {
+    final h12 = h24 % 12 == 0 ? 12 : h24 % 12;
+    final ampm = h24 < 12 ? 'AM' : 'PM';
+    timeStr = '${h12.toString().padLeft(2, '0')}:$m:$s $ampm';
+  }
+  final y = t.year;
+  final mo = t.month.toString().padLeft(2, '0');
+  final d = t.day.toString().padLeft(2, '0');
+  final String dateStr;
+  switch (dateFormat) {
+    case 'mdy':
+      dateStr = '$mo/$d/$y';
+    case 'dmy':
+      dateStr = '$d/$mo/$y';
+    case 'ymd':
+      dateStr = '$y-$mo-$d';
+    default:
+      dateStr = '${_shortMonths[t.month - 1]} ${t.day}, $y';
+  }
+  return '$dateStr, $timeStr';
+}
+
+/// Port of the PWA `_formatRelativeTime`: `now`, `{m}m ago`, `{h}h ago`, `{d}d ago`, then a date.
+String formatRelativeTime(DateTime t, {DateTime? now}) {
+  final ref = now ?? DateTime.now();
+  final diffMs = ref.difference(t).inMilliseconds;
+  final s = (diffMs < 0 ? 0 : diffMs) ~/ 1000;
+  if (s < 45) return 'now';
+  if (s < 90) return '1m ago';
+  final m = s ~/ 60;
+  if (m < 60) return '${m}m ago';
+  final h = m ~/ 60;
+  if (h < 24) return '${h}h ago';
+  final d = h ~/ 24;
+  if (d < 7) return '${d}d ago';
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  final mo = months[t.month - 1];
+  return t.year == ref.year ? '$mo ${t.day}' : '$mo ${t.day}, ${t.year}';
+}
+
+/// Marks a `/groupinfo` system row whose content encodes a structured payload rendered by [MessageRow].
+const String kGroupInfoSystemPrefix = '\u0000group-info\u0000';
+
+/// Already ordered owner, mods, members (each alphabetized).
+typedef GroupInfoMember = ({String pubkey, List<String> labels});
+
+typedef GroupInfoPayload = ({
+  String name,
+  int count,
+  List<GroupInfoMember> members,
+});
+
+String encodeGroupInfoSystemMessage(GroupInfoPayload info) {
+  return kGroupInfoSystemPrefix +
+      jsonEncode({
+        'name': info.name,
+        'count': info.count,
+        'members': [
+          for (final m in info.members) {'pk': m.pubkey, 'labels': m.labels},
+        ],
+      });
+}
+
+/// Null for any other content.
+GroupInfoPayload? decodeGroupInfoSystemMessage(String content) {
+  if (!content.startsWith(kGroupInfoSystemPrefix)) return null;
+  try {
+    final decoded =
+        jsonDecode(content.substring(kGroupInfoSystemPrefix.length));
+    if (decoded is! Map) return null;
+    final rawMembers = decoded['members'];
+    return (
+      name: (decoded['name'] as String?) ?? '',
+      count: (decoded['count'] as num?)?.toInt() ?? 0,
+      members: <GroupInfoMember>[
+        if (rawMembers is List)
+          for (final m in rawMembers)
+            if (m is Map && m['pk'] is String)
+              (
+                pubkey: m['pk'] as String,
+                labels: <String>[
+                  if (m['labels'] is List)
+                    for (final l in m['labels'] as List)
+                      if (l is String) l,
+                ],
+              ),
+      ],
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Port of the PWA `abbreviateNumber`: <1000 verbatim, then `1.2k`/`12k`, `1.2M`.
+String abbreviateNumber(int n) {
+  if (n < 1000) return '$n';
+  if (n < 1000000) {
+    final v = n / 1000;
+    return '${v.toStringAsFixed(n < 10000 ? 1 : 0)}k';
+  }
+  return '${(n / 1000000).toStringAsFixed(1)}M';
+}
+
+/// Renders one message in IRC or bubble layout, with reactions, context menu and quick-react interactions.
+class MessageRow extends ConsumerStatefulWidget {
+  const MessageRow({
+    super.key,
+    required this.message,
+    required this.settings,
+    required this.reactions,
+    this.mentioned = false,
+    this.grouped = false,
+    this.showAvatar = true,
+    this.showName = true,
+    this.inGroup = false,
+    this.columnsMode = false,
+    this.onReactionPicker,
+    this.bubbleAnchorKey,
+    this.swipeAvatarDx,
+    this.scrollKey,
+    this.showThreadAffordances = true,
+  });
+
+  final Message message;
+  final Settings settings;
+  final List<MessageReaction> reactions;
+  final bool mentioned;
+
+  /// False inside the thread panel, which must not render thread links or entries for its own rows.
+  final bool showThreadAffordances;
+
+  /// Storage key of the hosting list so a quote tap jumps that list; null in the single-chat view.
+  final String? scrollKey;
+
+  final bool columnsMode;
+
+  /// Set on a group's last message to key the bubble, so the gliding avatar aligns to it, not the group foot.
+  final GlobalKey? bubbleAnchorKey;
+
+  final bool grouped;
+
+  final bool showAvatar;
+
+  final bool showName;
+
+  /// Inside a [MessageGroup], which owns the horizontal padding and sticky avatar; emit only the content stack.
+  final bool inGroup;
+
+  /// Null makes the add-reaction affordances no-ops.
+  final ValueChanged<Message>? onReactionPicker;
+
+  /// Swipe offset for the group's sticky avatar, supplied for an others' group's last bubble only.
+  final ValueNotifier<double>? swipeAvatarDx;
+
+  @override
+  ConsumerState<MessageRow> createState() => _MessageRowState();
+}
+
+class _MessageRowState extends ConsumerState<MessageRow>
+    with SingleTickerProviderStateMixin
+    implements MessageHoverOwner {
+  final GlobalKey<HoverOpenRegionState> _readersHoverKey =
+      GlobalKey<HoverOpenRegionState>();
+  final Map<String, GlobalKey> _badgeKeys = <String, GlobalKey>{};
+  @override
+  String get hoverMessageId => widget.message.id;
+
+  /// Held in app state because lazy list rows don't keep State across scrolling or inserts.
+  String get _translateKey =>
+      widget.message.nymMessageId ?? widget.message.id;
+
+  bool get _showTranslation =>
+      ref.watch(translatedMessagesProvider
+          .select((m) => m.containsKey(_translateKey)));
+
+  String? get _translateLangOverride =>
+      ref.watch(translatedMessagesProvider.select((m) => m[_translateKey]));
+
+  void _showTranslated({String? lang}) => ref
+      .read(translatedMessagesProvider.notifier)
+      .show(_translateKey, lang: lang);
+
+  /// Desktop hover state; only set on hover-capable platforms.
+  bool _hovered = false;
+  bool _barFocused = false;
+
+  /// Whether subscribed to the shared 30s [RelativeTimeTicker].
+  bool _relativeTickerSubscribed = false;
+
+  /// Snap-in plays only for live-appended grouped messages (created in the last few seconds); latched on first build.
+  late final bool _snapIn = widget.grouped &&
+      widget.settings.useBubbles &&
+      !widget.message.isHistorical &&
+      DateTime.now().difference(widget.message.dateTime).inMilliseconds < 5000;
+
+  final SpoilerRevealController _spoilers = SpoilerRevealController();
+
+  final GlobalKey _barHostKey = GlobalKey();
+  final GlobalKey _barAnchorKey = GlobalKey();
+  final GlobalKey _barKey = GlobalKey();
+  final GlobalKey _barLineKey = GlobalKey();
+  final OverlayPortalController _barPortal = OverlayPortalController();
+  bool _barActive = false;
+  Offset? _barPos;
+  bool _keyFocus = false;
+  final GlobalKey<SelectionAreaState> _selKey = GlobalKey<SelectionAreaState>();
+  final FocusNode _selFocus =
+      FocusNode(skipTraversal: true, debugLabel: 'messageSelection');
+  String _selectedText = '';
+  MessageSelectionState? _list;
+  MessageBodySelection? _listBody;
+  _CopyMenuRoute? _copyMenu;
+  EscapeLayer? _copyLayer;
+
+  bool get _barShown => _barActive || _barFocused || _keyFocus;
+
+  void _onRowFocus(bool has) {
+    final fm = FocusManager.instance;
+    final key = has &&
+        fm.highlightMode == FocusHighlightMode.traditional &&
+        !identical(fm.primaryFocus, _selFocus);
+    if (key == _keyFocus || !mounted) return;
+    setState(() {
+      _keyFocus = key;
+      if (key) _refreshBar();
+    });
+    if (!key) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_keyFocus) return;
+      final pos = _computeBarPos();
+      if (pos != _barPos) setState(() => _barPos = pos);
+    });
+  }
+
+  Widget _selectable(Widget child) {
+    if (!PointerInput.mouseOf(context)) return child;
+    final list = MessageSelection.maybeOf(context);
+    final registrar = MessageSelection.itemRegistrarOf(context);
+    if (list != null && registrar != null) {
+      if (_listBody == null) {
+        _list = list;
+        _listBody = list.body();
+      }
+      return GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTapDown: (_) => list.focus(),
+        onTap: list.clear,
+        child: SelectionContainer(
+            registrar: registrar, delegate: _listBody!, child: child),
+      );
+    }
+    return SelectionArea(
+      key: _selKey,
+      focusNode: _selFocus,
+      onSelectionChanged: (s) {
+        _selectedText = s?.plainText ?? '';
+        if (_selectedText.isEmpty) _closeCopyMenu();
+      },
+      child: child,
+    );
+  }
+
+  bool _hitsLinkOrAuthor(Offset global) {
+    final result = HitTestResult();
+    WidgetsBinding.instance
+        .hitTestInView(result, global, View.of(context).viewId);
+    for (final e in result.path) {
+      final t = e.target;
+      if (messageLinkHit(t)) return true;
+      if (t is RenderMetaData && identical(t.metaData, _kAuthorTag)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void _doubleClick(Offset global) {
+    if (_hitsLinkOrAuthor(global)) return;
+    scheduleMicrotask(() {
+      if (!mounted) return;
+      if (_listBody != null) {
+        _list?.clear();
+      } else {
+        _selKey.currentState?.selectableRegion.clearSelection();
+      }
+    });
+    _quoteReply();
+  }
+
+  void _secondaryClick(BuildContext context, Offset global) {
+    final list = _listBody == null ? null : _list;
+    final sel = list != null
+        ? list.region
+        : _selKey.currentState?.selectableRegion;
+    final text = list != null ? list.text.value : _selectedText;
+    if (sel == null || text.isEmpty) {
+      _openContextMenu(context);
+      return;
+    }
+    _closeCopyMenu();
+    list?.text.addListener(_onListText);
+    final route = _CopyMenuRoute(
+      onGone: (r) {
+        if (!identical(_copyMenu, r)) return;
+        _list?.text.removeListener(_onListText);
+        _copyMenu = null;
+        EscapeLayers.remove(_copyLayer);
+        _copyLayer = null;
+      },
+      builder: (_) => TapRegion(
+        onTapOutside: (_) => _closeCopyMenu(),
+        child: AdaptiveTextSelectionToolbar.buttonItems(
+          anchors: TextSelectionToolbarAnchors(primaryAnchor: global),
+          buttonItems: [
+            ContextMenuButtonItem(
+              type: ContextMenuButtonType.copy,
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: text));
+                _closeCopyMenu();
+              },
+            ),
+            ContextMenuButtonItem(
+              type: ContextMenuButtonType.selectAll,
+              onPressed: () {
+                _closeCopyMenu();
+                sel.selectAll();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+    _copyMenu = route;
+    _copyLayer = EscapeLayers.add(
+        EscapeRank.quickReact + 10, () => _copyMenu != null, _closeCopyMenu);
+    Navigator.of(context, rootNavigator: true).push(route);
+  }
+
+  void _onListText() {
+    if (_list?.text.value.isEmpty ?? true) _closeCopyMenu();
+  }
+
+  void _closeCopyMenu() {
+    final r = _copyMenu;
+    if (r == null) return;
+    _list?.text.removeListener(_onListText);
+    _copyMenu = null;
+    EscapeLayers.remove(_copyLayer);
+    _copyLayer = null;
+    void drop() {
+      if (r.isActive) r.navigator?.removeRoute(r);
+    }
+
+    if (WidgetsBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => drop());
+    } else {
+      drop();
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _barPortal.show();
+    HoverBarController.instance.addListener(_onHoverBarChange);
+    PointerInput.instance.addListener(_onPointerMode);
+    _RowFocusTracker.ensure();
+  }
+
+  void _onPointerMode() {
+    if (!mounted) return;
+    setState(() {
+      if (!PointerInput.instance.value) _hovered = false;
+    });
+    if (!PointerInput.instance.value) HoverBarController.instance.release(this);
+  }
+
+  void _onHoverBarChange() {
+    final on = identical(HoverBarController.instance.active, this);
+    if (on == _barActive || !mounted) return;
+    setState(() {
+      _barActive = on;
+      if (on) {
+        _refreshBar();
+        _barPos = _computeBarPos();
+      }
+    });
+  }
+
+  Rect? _firstLineRect(RenderBox anchor, RenderBox host) {
+    RenderParagraph? para;
+    void visit(RenderObject o) {
+      if (para != null) return;
+      if (o is RenderParagraph) {
+        para = o;
+        return;
+      }
+      o.visitChildren(visit);
+    }
+
+    visit(anchor);
+    final p = para;
+    if (p == null || !p.hasSize) return null;
+    final len = p.text.toPlainText(includeSemanticsLabels: false).length;
+    if (len == 0) return null;
+    final boxes = p.getBoxesForSelection(
+        TextSelection(baseOffset: 0, extentOffset: len));
+    if (boxes.isEmpty) return null;
+    final top = boxes.first.top;
+    var r = boxes.first.toRect();
+    for (final b in boxes.skip(1)) {
+      if ((b.top - top).abs() > 4) break;
+      r = r.expandToInclude(b.toRect());
+    }
+    return MatrixUtils.transformRect(p.getTransformTo(host), r);
+  }
+
+  Offset? _computeBarPos() {
+    final host = _barHostKey.currentContext?.findRenderObject();
+    final anchorObj = _barAnchorKey.currentContext?.findRenderObject();
+    final barObj = _barKey.currentContext?.findRenderObject();
+    if (host is! RenderBox || anchorObj is! RenderBox || barObj is! RenderBox) {
+      return null;
+    }
+    if (!host.hasSize || !anchorObj.hasSize || !barObj.hasSize) return null;
+    final bubbles = settings.useBubbles;
+    var anchor = MatrixUtils.transformRect(
+        anchorObj.getTransformTo(host), Offset.zero & anchorObj.size);
+    if (!bubbles) anchor = _firstLineRect(anchorObj, host) ?? anchor;
+    final bh = barObj.size.height;
+    var clip = host.globalToLocal(Offset.zero) & MediaQuery.sizeOf(context);
+    final scrollBox = Scrollable.maybeOf(context)?.context.findRenderObject();
+    if (scrollBox is RenderBox && scrollBox.hasSize) {
+      final view = MatrixUtils.transformRect(
+          scrollBox.getTransformTo(host), Offset.zero & scrollBox.size);
+      clip = clip.intersect(view);
+    }
+    const edge = kHoverBarEdge;
+    _barAvailablePx = clip.width - 2 * edge;
+    final bw = hoverBarWidth(_barButtons.length);
+    final top = math.max(clip.top + edge, 0.0);
+    final lineObj = !bubbles && widget.columnsMode
+        ? _barLineKey.currentContext?.findRenderObject()
+        : null;
+    double x;
+    double y;
+    if (lineObj is RenderBox && lineObj.hasSize) {
+      final line = MatrixUtils.transformRect(
+          lineObj.getTransformTo(host), Offset.zero & lineObj.size);
+      final box = MatrixUtils.transformRect(
+          anchorObj.getTransformTo(host), Offset.zero & anchorObj.size);
+      x = box.right - bw;
+      y = line.center.dy - bh / 2;
+    } else if (bubbles) {
+      return hoverBarSpot(anchor, clip, bw, bh,
+          self: message.isOwn, columns: widget.columnsMode);
+    } else {
+      x = anchor.right + kHoverBarOverlap;
+      y = anchor.top - bh + 8;
+    }
+    x = math.min(x, clip.right - edge - bw);
+    x = math.max(x, clip.left + edge);
+    y = math.max(y, top);
+    y = math.min(y, host.size.height - bh);
+    y = math.max(y, 0);
+    return Offset(x.roundToDouble(), y.roundToDouble());
+  }
+
+  bool get _barThreadable =>
+      appThreadsEnabled &&
+      widget.showThreadAffordances &&
+      (message.threadRoot != null || threadEligibleRoot(message));
+
+  double _barAvailablePx = double.infinity;
+
+  List<String>? _barFull;
+  List<String>? _barSlots;
+
+  void _refreshBar() {
+    _barSlots = settings.hoverActions;
+    _barFull = [
+      ...resolveHoverActions(_barSlots, [
+        if (widget.onReactionPicker != null) 'react',
+        for (final item in _sheetItems(context))
+          if (item.id case final String id) id,
+      ]),
+      'more',
+    ];
+  }
+
+  List<String> get _barButtons =>
+      fitHoverBar(_barFull ?? const ['more'], _barAvailablePx);
+
+  void _hoverEnter() {
+    setState(() => _hovered = true);
+    HoverBarController.instance.request(this);
+  }
+
+  void _hoverExit() {
+    setState(() => _hovered = false);
+    HoverBarController.instance.request(null);
+  }
+
+  @override
+  void dispose() {
+    HoverBarController.instance.removeListener(_onHoverBarChange);
+    PointerInput.instance.removeListener(_onPointerMode);
+    _RowFocusTracker.forget(this);
+    _flashCtl?.dispose();
+    HoverBarController.instance.release(this);
+    _closeCopyMenu();
+    _listBody?.dispose();
+    _selFocus.dispose();
+    _spoilers.dispose();
+    if (_relativeTickerSubscribed) {
+      RelativeTimeTicker.instance.removeListener(_onRelativeTick);
+      _relativeTickerSubscribed = false;
+    }
+    super.dispose();
+  }
+
+  void _onRelativeTick() {
+    if (mounted) setState(() {});
+  }
+
+  Message get message => widget.message;
+  Settings get settings => widget.settings;
+  List<MessageReaction> get reactions {
+    final hidden = ref.read(hiddenEmojiProvider);
+    if (hidden.codes.isEmpty) return widget.reactions;
+    return [
+      for (final r in widget.reactions)
+        if (!hidden.token(r.emoji)) r,
+    ];
+  }
+
+  /// Null gives the identicon fallback.
+  String? get _authorPicture => message.localOnlyRow
+      ? localAccountAvatar(ref, message)
+      : ref.watch(usersProvider
+          .select((u) => u[message.pubkey]?.profile?.picture));
+
+  bool get _isVerified {
+    final controller = ref.read(nostrControllerProvider);
+    return controller.isVerifiedDeveloper(message.pubkey) ||
+        controller.isVerifiedBot(message.pubkey);
+  }
+
+  /// Selects only this author's friend flag so ambient app-state emits don't rebuild every row.
+  bool get _isFriendAuthor =>
+      !message.isOwn &&
+      ref.watch(appStateProvider.select((s) => s.isFriend(message.pubkey)));
+
+  /// Post-quantum shield state, or null; separate from [_cryptoState] (confidentiality vs authentication).
+  PqBadgeState? get _pqState {
+    if (!message.isPM && !message.isGroup) return null;
+    return pqBadgeStateFor(
+      pqEncrypted: message.pqEncrypted,
+      pqRoot: message.pqRoot,
+      pqCoverage: message.pqCoverage,
+      isGroup: message.isGroup,
+    );
+  }
+
+  CryptoVerifyState? get _cryptoState {
+    if (!message.isPM && !message.isGroup) return null;
+    switch (message.senderVerified) {
+      case true:
+        return CryptoVerifyState.verified;
+      case false:
+        return CryptoVerifyState.unverified;
+      case null:
+        return CryptoVerifyState.unknown;
+    }
+  }
+
+  /// `.mentioned` highlight: port of the PWA's case-insensitive `isMentioned`; never for self or 1:1 PM rows.
+  bool _isMentionedRow() {
+    if (message.isOwn || (message.isPM && !message.isGroup)) return false;
+    if (widget.mentioned) return true;
+    if (message.isGroup && ref.read(groupToolsProvider).mentionsAll(message)) {
+      return true;
+    }
+    return contentMentionsSelf(
+      content: message.content,
+      nym: ref.read(appStateProvider).selfNym,
+      pubkey: ref.read(nostrControllerProvider).identity?.pubkey,
+    );
+  }
+
+  /// Reply count for a thread root (0 hides the link).
+  int get _threadReplyCount {
+    if (!appThreadsEnabled || !widget.showThreadAffordances) return 0;
+    final m = message;
+    if (m.threadRoot != null || m.isSystemRow || m.isMeAction) return 0;
+    final key =
+        widget.scrollKey ?? ref.read(appStateProvider).view.storageKey;
+    final thread = threadKeyForMessage(m);
+    return ref.watch(
+        threadCountsProvider(key).select((counts) => counts[thread] ?? 0));
+  }
+
+  bool get _threadTapEligible =>
+      appThreadsEnabled &&
+      widget.showThreadAffordances &&
+      (message.threadRoot != null || threadEligibleRoot(message));
+
+  bool get _threadHasNewReply {
+    final key =
+        widget.scrollKey ?? ref.read(appStateProvider).view.storageKey;
+    final root = threadKeyForMessage(message);
+    if (key.isEmpty || root.isEmpty) return false;
+    return ref.watch(
+        threadNewRepliesProvider.select((s) => s.contains('$key|$root')));
+  }
+
+  Widget _threadIndicator(BuildContext context, int count) {
+    final c = context.nym;
+    final isNew = _threadHasNewReply;
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () =>
+            openMessageThread(ref, message, storageKey: widget.scrollKey),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: c.primaryA(isNew ? 0.12 : 0.06),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: c.primaryA(isNew ? 0.4 : 0.25)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              NymSvgIcon(NymIcons.thread, size: 14, color: c.primary),
+              const SizedBox(width: 6),
+              Text(
+                count == 1
+                    ? tr('1 reply')
+                    : tr('{n} replies', {'n': abbreviateNumber(count)}),
+                style: TextStyle(
+                  color: c.primary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              if (isNew) ...[
+                const SizedBox(width: 6),
+                Container(
+                  constraints:
+                      const BoxConstraints(minWidth: 18, minHeight: 18),
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: c.primary,
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Text(
+                    tr('New'),
+                    style: TextStyle(
+                      color: c.bg,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  bool get _hasZaps {
+    final z = ref.watch(zapsProvider)[message.id];
+    return z != null && z.totalSats > 0;
+  }
+
+  /// Only above the mobile breakpoint and for messages with a usable reaction id.
+  bool _hoverButtonsEligible(BuildContext context) {
+    if (message.isPM && (message.nymMessageId?.isNotEmpty ?? false)) {
+      return true;
+    }
+    return RegExp(r'^[0-9a-f]{64}$', caseSensitive: false).hasMatch(message.id);
+  }
+
+  void _ensureRelativeTimer() {
+    if (_relativeTickerSubscribed) return;
+    _relativeTickerSubscribed = true;
+    RelativeTimeTicker.instance.addListener(_onRelativeTick);
+  }
+
+  /// Resolved from the shop controller (self) or presence.
+  UserCosmetics get _cosmetics => message.localOnlyRow
+      ? const UserCosmetics()
+      : ref.watch(userCosmeticsProvider(message.pubkey));
+
+  /// The supporter gold treatment composes over an active style, as the PWA applies both classes.
+  MessageStyleDecoration? _styleDecoration(BuildContext context) {
+    final cos = _cosmetics;
+    final c = context.nym;
+    final isLight = c.isLight;
+    final solidUi = c.solidUi;
+    final styled =
+        messageStyleDecoration(cos.styleId, isLight: isLight, solidUi: solidUi);
+    if (styled != null) {
+      return cos.supporter
+          ? composeSupporterStyle(styled, cos.styleId!,
+              isLight: isLight, solidUi: solidUi)
+          : styled;
+    }
+    if (cos.supporter) {
+      return supporterStyleDecorationFor(isLight: isLight, solidUi: solidUi);
+    }
+    return null;
+  }
+
+  /// Aura cosmetics resolved for the current brightness and solid-ui.
+  List<CosmeticAura> _resolveAuras(BuildContext context) =>
+      resolveCosmeticAuras(_cosmetics,
+          isLight: context.nym.isLight, solidUi: context.nym.solidUi);
+
+  /// Raw `style-…` classes trip the CSS `:not([class*="style-"])` gates; `supporter-style` does not.
+  bool get _styleClassActive =>
+      _cosmetics.styleId?.startsWith('style-') ?? false;
+
+  Widget _nymBadges(BuildContext context, {double flairSize = 16}) {
+    return CosmeticNymBadges(
+      cosmetics: _cosmetics,
+      flairSize: flairSize,
+      supporterHeight: flairSize,
+    );
+  }
+
+  /// Author label for both layouts: nym with dimmed `#suffix` (brackets IRC-only) then badges.
+  Widget _authorLine(
+    NymColors c, {
+    required bool self,
+    required double size,
+    required double flairSize,
+    bool brackets = false,
+  }) =>
+      MetaData(
+        metaData: _kAuthorTag,
+        behavior: HitTestBehavior.translucent,
+        child: _authorLineBody(c,
+            self: self, size: size, flairSize: flairSize, brackets: brackets),
+      );
+
+  Widget _authorLineBody(
+    NymColors c, {
+    required bool self,
+    required double size,
+    required double flairSize,
+    bool brackets = false,
+  }) {
+    final base = _authorStyle(c, self: self, size: size);
+    final style = context.highContrast && base.color != null
+        ? base.copyWith(
+            color: legibleOnAll(base.color!, [bubbleBgFor(c), c.bg]))
+        : base;
+    final bracketColor = style.color;
+    final suffix = getPubkeySuffix(message.pubkey);
+    final genesisSuffix = hasGenesisFlair(_cosmetics);
+    // Prefer the live profile nym over the one frozen at ingest; watched so rows repaint when it lands.
+    final liveNym = ref.watch(
+        usersProvider.select((u) => u[message.pubkey]?.nym));
+    // Strip the suffix so the canonical one isn't appended twice.
+    final baseNym = pickDisplayNym(liveNym, message.author);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (brackets)
+          Text('<', style: TextStyle(color: bracketColor, fontSize: size)),
+        Flexible(
+          child: NymLabel(baseNym,
+              suffix: suffix, style: style, genesis: genesisSuffix),
+        ),
+        _nymBadges(context, flairSize: flairSize),
+        if (_isVerified) ...[
+          const SizedBox(width: 4),
+          VerifiedBadge(size: flairSize),
+        ],
+        if (_isFriendAuthor) ...[
+          const SizedBox(width: 4),
+          FriendBadge(size: flairSize),
+        ],
+        if (brackets)
+          Text('>', style: TextStyle(color: bracketColor, fontSize: size)),
+      ],
+    );
+  }
+
+  /// Bolds Genesis holders only; supporter gold never applies to the author nym.
+  TextStyle _authorStyle(NymColors c,
+      {required bool self, required double size}) {
+    final genesis = hasGenesisFlair(_cosmetics);
+    // The redacted cosmetic dims the author nym too; light mode uses a dark nym.
+    final color = _cosmetics.isRedacted
+        ? (c.isLight
+            ? const Color(0xFF1A1A1A).withValues(alpha: 0.75)
+            : Colors.white.withValues(alpha: 0.8))
+        : (self ? c.primary : (_bitchatColor(c) ?? c.secondary));
+    return TextStyle(
+      color: color,
+      fontSize: size,
+      fontWeight: genesis ? FontWeight.w700 : FontWeight.w600,
+      letterSpacing: 0.2,
+    );
+  }
+
+  /// Per-user color for a non-self author in the Bitchat theme only; applied to both nym and body.
+  bool get _hasTextFlair {
+    final cos = _cosmetics;
+    return cos.styleId != null || cos.supporter || cos.cosmetics.isNotEmpty;
+  }
+
+  Color _bodyColor(NymColors c) => settings.colorfulMessages || _hasTextFlair
+      ? (_bitchatColor(c) ?? c.text)
+      : c.messageText;
+
+  Color? _bitchatColor(NymColors c) {
+    if (message.isOwn) return null;
+    if (settings.theme != NymThemeKey.bitchat) return null;
+    return bitchatUserColor(message.pubkey, isLight: c.isLight);
+  }
+
+  Widget _bodyContent(
+    BuildContext context,
+    Color color,
+    double fontSize, {
+    MessageStyleDecoration? deco,
+    bool bubble = false,
+  }) {
+    return MediaNoteHost(
+      isOwn: message.isOwn,
+      senderPubkey: message.pubkey,
+      groupId: message.isGroup ? message.groupId : null,
+      messageId: message.id,
+      localPath: message.hasLocalMedia ? message.localMediaPath : null,
+      meshPeerPubkey: message.viaMesh ? message.pubkey : null,
+      child: _bodyContentInner(context, color, fontSize,
+          deco: deco, bubble: bubble),
+    );
+  }
+
+  /// Body: a P2P file-offer card, a redacted block, or rich content tinted by the active style.
+  Widget _bodyContentInner(
+    BuildContext context,
+    Color color,
+    double fontSize, {
+    MessageStyleDecoration? deco,
+    bool bubble = false,
+  }) {
+    if (message.isFileOffer && message.fileOffer != null) {
+      final p2p = ref.read(p2pServiceProvider);
+      // Stop broadcasts with the open channel's wire tag (`g` or `d`), like the PWA.
+      final app = ref.read(appStateProvider);
+      final v = app.view;
+      final isGeoChannel = v.kind == ViewKind.channel &&
+          app.channels
+              .any((ch) => ch.key == v.id.toLowerCase() && ch.isGeohash);
+      final isNamedChannel = v.kind == ViewKind.channel && !isGeoChannel;
+      return FileOfferCard(
+        offer: FileOffer.fromJson(message.fileOffer!),
+        isOwn: message.isOwn,
+        service: p2p,
+        seedGeohash: isGeoChannel ? v.id : null,
+        seedChannelName: isNamedChannel ? v.id : null,
+      );
+    }
+    // Locally stored mesh media renders inline in place of the text body.
+    if (message.hasLocalMedia) {
+      final note = localMediaNote(message.localMediaName, message.localMediaMime);
+      if (note != null) {
+        return MediaNoteView(note: note, localPath: message.localMediaPath);
+      }
+      return _LocalMediaBody(
+        path: message.localMediaPath!,
+        mime: message.localMediaMime,
+        name: message.localMediaName,
+        colors: context.nym,
+      );
+    }
+    if (gtHasCard(message)) return GtMessageCard(message: message);
+    if (dmPollHasCard(message)) return DmPollCard(message: message);
+    // Redacted cosmetic: real text for 10s, then a translucent bar.
+    final Widget body;
+    if (_cosmetics.isRedacted) {
+      body = _RedactedReveal(
+        fontSize: fontSize,
+        child: _selectable(
+            _content(context, color, fontSize, deco: deco, bubble: bubble)),
+      );
+    } else {
+      body = _selectable(
+          _content(context, color, fontSize, deco: deco, bubble: bubble));
+    }
+    // A bot reply's reasoning section is prepended inside the content.
+    final thinking = message.thinking;
+    if (thinking != null &&
+        thinking.trim().isNotEmpty &&
+        (message.isBot ||
+            ref.read(nostrControllerProvider).isVerifiedBot(message.pubkey))) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _BotThinkSection(
+            reasoning: thinking,
+            fontSize: settings.textSize.toDouble() * 0.88,
+          ),
+          body,
+        ],
+      );
+    }
+    return body;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.watch(hiddenEmojiProvider.select((h) => h));
+    if (message.isSystemRow) return _buildSystemMessage(context);
+    if (message.isMeAction) return _buildActionMessage(context);
+    Widget row =
+        settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
+    final withButtons = _hoverButtonsEligible(context);
+    if (PointerInput.mouseOf(context) || (_keyFocus && withButtons)) {
+      Widget hoverChild = row;
+      if (withButtons) {
+        if (_barShown && !identical(_barSlots, settings.hoverActions)) {
+          _refreshBar();
+        }
+        final pos = _barShown ? _barPos : null;
+        final bar = AnimatedOpacity(
+          key: _barKey,
+          opacity: _barShown ? 1 : 0,
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          child: _MsgHoverButtons(
+            buttons: _barButtons,
+            onFocusChange: (v) {
+              if (v == _barFocused) return;
+              setState(() {
+                _barFocused = v;
+                if (v && !_barActive) {
+                  _refreshBar();
+                  _barPos = _computeBarPos();
+                }
+              });
+            },
+            onAction: (id) => _runBarAction(context, id),
+            onMore: (r) => _onMessageLongPress(context, r.center),
+          ),
+        );
+        final barLayer = IgnorePointer(
+          ignoring: !_barShown,
+          child: MouseRegion(
+            onEnter: (_) => _hoverEnter(),
+            onExit: (_) => _hoverExit(),
+            child: bar,
+          ),
+        );
+        hoverChild = OverlayPortal.overlayChildLayoutBuilder(
+          controller: _barPortal,
+          overlayChildBuilder: (context, info) {
+            final at = MatrixUtils.transformPoint(info.childPaintTransform,
+                pos ?? Offset(info.childSize.width - 10, 0));
+            return Positioned(
+              left: pos == null ? null : at.dx,
+              right: pos == null ? info.overlaySize.width - at.dx : null,
+              top: at.dy,
+              child: barLayer,
+            );
+          },
+          child: KeyedSubtree(key: _barHostKey, child: row),
+        );
+      }
+      row = MouseRegion(
+        onEnter: (_) => _hoverEnter(),
+        onExit: (_) => _hoverExit(),
+        child: MessageHover(
+          messageId: message.id,
+          hovered: _hovered || _barShown,
+          child: hoverChild,
+        ),
+      );
+    } else if (withButtons) {
+      row = KeyedSubtree(key: _barHostKey, child: row);
+    }
+    // Dim live flooding senders only; PMs and historical backlog are never dimmed.
+    if (!message.isOwn &&
+        !message.isPM &&
+        !message.isHistorical &&
+        ref.watch(floodTrackerProvider
+            .select((f) => f.isFlooding(message.pubkey)))) {
+      row = Opacity(opacity: 0.2, child: row);
+    }
+    // IRC rows take a whole-row thread tap; in bubble mode only the bubble is the target.
+    if (!settings.useBubbles && _threadTapEligible) {
+      final tappableRow = row;
+      row = RowTap(
+        behavior: HitTestBehavior.translucent,
+        onTap: () =>
+            openMessageThread(ref, message, storageKey: widget.scrollKey, silent: true),
+        child: tappableRow,
+      );
+    }
+    // Pulse the highlight when a quote tap scrolls to this message.
+    _syncFlash(ref.watch(flashedMessageProvider) == message.id);
+    return _RowFlash(opacity: _flashOpacity, child: row);
+  }
+
+  AnimationController? _flashCtl;
+  Animation<double>? _flashOpacity;
+  bool _flashOn = false;
+
+  void _syncFlash(bool active) {
+    if (active && !_flashOn) {
+      final ctl = _flashCtl ??= AnimationController(
+        duration: const Duration(milliseconds: 1800),
+        vsync: this,
+      );
+      _flashOpacity ??= TweenSequence<double>([
+        TweenSequenceItem(
+          tween: Tween(begin: 0.0, end: 1.0)
+              .chain(CurveTween(curve: Curves.easeOut)),
+          weight: 8,
+        ),
+        TweenSequenceItem(tween: ConstantTween(1.0), weight: 37),
+        TweenSequenceItem(
+          tween: Tween(begin: 1.0, end: 0.0)
+              .chain(CurveTween(curve: Curves.easeOut)),
+          weight: 55,
+        ),
+      ]).animate(ctl);
+      ctl.forward(from: 0);
+    }
+    _flashOn = active;
+  }
+
+  /// Centered system pill; `.action-message` is a bare left-aligned italic line; optional action button below.
+  Widget _buildSystemMessage(BuildContext context) {
+    final c = context.nym;
+    final isAction = message.kind == MessageKind.action;
+    final size = settings.textSize.toDouble() - 3;
+    if (message.people.isNotEmpty) {
+      ref.watch(appStateProvider.select((s) =>
+          Object.hash(s.contentFilterSignature, s.autoMutedUsers.length)));
+    }
+    final app = ref.read(appStateProvider);
+    final key = widget.scrollKey ?? app.view.storageKey;
+    final groupId = message.groupId ??
+        (key.startsWith('group-') ? key.substring(6) : null);
+    final known = [
+      app.selfPubkey,
+      if (groupId != null)
+        ...?ref.read(appStateProvider.notifier).groupById(groupId)?.members,
+    ];
+    // Action messages replace the `.system-message` class, so no pill or centering.
+    final text = NymText(
+      app.systemRowText(message),
+      known: known,
+      textAlign: isAction ? TextAlign.start : TextAlign.center,
+      style: TextStyle(
+        color: isAction ? c.purple : c.textDim,
+        // Action text inherits a fixed 14px; only system pills scale with text size.
+        fontSize: isAction ? 14 : size,
+        fontStyle: isAction ? FontStyle.italic : FontStyle.normal,
+        // CSS weight 450; w500 is nearest.
+        fontWeight: isAction ? FontWeight.w400 : FontWeight.w500,
+        height: 1.3,
+      ),
+    );
+    final action = message.systemAction;
+    final groupInfo =
+        isAction ? null : decodeGroupInfoSystemMessage(message.content);
+    final Widget pillChild = groupInfo != null
+        ? _groupInfoBlock(context, groupInfo, size)
+        : action == null
+            ? text
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  text,
+                  const SizedBox(height: 8),
+                  _SystemActionButton(
+                    label: action.label,
+                    onTap: () => _runSystemAction(context, action),
+                  ),
+                ],
+              );
+    if (isAction) {
+      return Align(alignment: Alignment.centerLeft, child: text);
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.03),
+            border: Border.all(color: c.glassBorder),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+          ),
+          child: pillChild,
+        ),
+      ),
+    );
+  }
+
+  /// `/groupinfo` block; nyms and avatars resolve live so late profiles fill in.
+  Widget _groupInfoBlock(
+      BuildContext context, GroupInfoPayload info, double size) {
+    final c = context.nym;
+    ref.watch(usersProvider.select((u) => [
+          for (final m in info.members)
+            '${u[m.pubkey]?.nym}\u0000${u[m.pubkey]?.profile?.picture}',
+        ].join('\u0001')));
+    final users = ref.read(usersProvider);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          tr('Group: "{name}"', {'name': info.name}),
+          style: TextStyle(
+            color: c.textDim,
+            fontSize: size,
+            fontWeight: FontWeight.w600,
+            height: 1.3,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          tr('Members ({count})', {'count': info.count}),
+          style: TextStyle(color: c.textDim, fontSize: 12),
+        ),
+        const SizedBox(height: 6),
+        for (var i = 0; i < info.members.length; i++) ...[
+          if (i > 0) const SizedBox(height: 5),
+          _groupInfoMemberRow(context, users, info.members[i], size),
+        ],
+      ],
+    );
+  }
+
+  Widget _groupInfoMemberRow(
+    BuildContext context,
+    Map<String, User> users,
+    GroupInfoMember member,
+    double size,
+  ) {
+    final c = context.nym;
+    final pk = member.pubkey;
+    final mask =
+        ref.watch(appStateProvider.select((s) => s.personMaskLabel(pk)));
+    final baseNym = mask.isNotEmpty ? mask : pickDisplayNym(users[pk]?.nym, null);
+    final suffix = getPubkeySuffix(pk);
+    final nymStyle = TextStyle(color: c.textDim, fontSize: size, height: 1.3);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        NymAvatar(
+          seed: pk,
+          size: 22,
+          imageUrl: mask.isNotEmpty ? null : users[pk]?.profile?.picture,
+        ),
+        const SizedBox(width: 6),
+        Flexible(
+          child: NymLabel(baseNym, suffix: suffix, style: nymStyle),
+        ),
+        if (mask.isEmpty)
+          CosmeticNymBadges(
+            cosmetics: ref.watch(userCosmeticsProvider(pk)),
+            flairSize: 20,
+            supporterHeight: 20,
+          ),
+        if (member.labels.isNotEmpty) ...[
+          const SizedBox(width: 6),
+          Text(
+            member.labels.join(', '),
+            style: TextStyle(
+              color: c.primary.withValues(alpha: 0.8),
+              fontSize: 10,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// The spam false-positive action opens the About contact form prefilled with the message.
+  void _runSystemAction(BuildContext context, SystemAction action) {
+    switch (action.kind) {
+      case SystemActionKind.reportSpamFalsePositive:
+        final content = action.payload;
+        final body = content.isNotEmpty
+            ? 'The following message was incorrectly flagged by the spam '
+                'filter:\n\n```\n$content\n```'
+            : 'A message was incorrectly flagged by the spam filter.';
+        AboutScreen.open(
+          context,
+          initialTopic: 'Spam false positive',
+          initialMessage: body,
+        );
+      case SystemActionKind.retryMediaNote:
+        ref.read(mediaNoteSenderProvider).retry();
+    }
+  }
+
+  /// `/me` emote as an italic `* author action *` line in a pill.
+  Widget _buildActionMessage(BuildContext context) {
+    final c = context.nym;
+    final fontSize = settings.textSize.toDouble() - 3;
+    final action = message.content.startsWith('/me ')
+        ? message.content.substring(4)
+        : message.content;
+    final suffix = getPubkeySuffix(message.pubkey);
+    // Cap both parts to the pill's content width so long nyms ellipsize and actions wrap.
+    final maxW =
+        (MediaQuery.of(context).size.width - 48).clamp(120.0, double.infinity);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.03),
+            border: Border.all(color: c.glassBorder),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+          ),
+          child: DefaultTextStyle(
+            style: TextStyle(
+              color: c.textDim,
+              fontSize: fontSize,
+              fontStyle: FontStyle.italic,
+              height: 1.3,
+            ),
+            // A Wrap lets the action flow to the next line instead of overflowing.
+            child: Wrap(
+              spacing: 4,
+              runSpacing: 2,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxW),
+                  child: RowTap(
+                    onTap: () => _openContextMenu(context),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        const Text('* '),
+                        NymAvatar(
+                            seed: message.pubkey,
+                            size: fontSize + 2,
+                            imageUrl: _authorPicture,
+                            localOnly: message.localOnlyRow),
+                        const SizedBox(width: 4),
+                        Flexible(
+                          child: NymLabel(
+                            pickDisplayNym(
+                                ref.watch(usersProvider.select(
+                                    (u) => u[message.pubkey]?.nym)),
+                                message.author),
+                            suffix: suffix,
+                            style: TextStyle(
+                              color: c.secondary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        _nymBadges(context, flairSize: 20),
+                      ],
+                    ),
+                  ),
+                ),
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxW),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: MessageContent(
+                          content: action,
+                          fontSize: fontSize,
+                        ),
+                      ),
+                      const Text(' *'),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIrc(BuildContext context) {
+    final c = context.nym;
+    final fontSize = settings.textSize.toDouble();
+    final self = message.isOwn;
+
+    final deco = _styleDecoration(context);
+    final mentioned = _isMentionedRow();
+
+    Color? bg;
+    Color? barColor;
+    Color? barGlow = mentioned ? c.secondaryA(0.4) : null;
+    if (self) {
+      bg = c.secondaryA(0.05);
+      barColor = c.isLight
+          ? const Color(0x40000000)
+          : const Color(0x4DFFFFFF);
+    } else if (mentioned) {
+      bg = c.isLight
+          ? const Color(0x08000000)
+          : c.secondaryA(0.06);
+      barColor = c.secondary;
+    }
+    // The hover tint replaces self/mention fills (it follows them in the CSS); bubble mode has none.
+    if (_hovered) {
+      bg = c.isLight
+          ? Colors.black.withValues(alpha: 0.03)
+          : (message.isPM
+              ? const Color(0x0AFF00FF)
+              : Colors.white.withValues(alpha: 0.03));
+      if (message.isPM) {
+        barColor = c.purple;
+        barGlow = const Color(0x4DFF00FF);
+      }
+    }
+    List<Color>? bgGradient;
+    // IRC paints supporter accents on the row; style content plates belong to the content box.
+    if (deco?.borderAccent != null) {
+      barColor = deco!.borderAccent;
+      bgGradient = deco.backgroundGradient ?? bgGradient;
+    }
+    // Gold/neon/phoenix/cosmic auras are row-scoped in IRC; frost/rainbow/hologram decorate the content box.
+    final auras = _resolveAuras(context);
+    final rowAuras = [
+      for (final a in auras)
+        if (a.borderAccent != null) a,
+    ];
+    final contentAuras = [
+      for (final a in auras)
+        if (a.borderAccent == null) a,
+    ];
+    final rowAura = rowAuras.isNotEmpty ? rowAuras.last : null;
+    if (rowAura != null) {
+      barColor = rowAura.borderAccent;
+      bgGradient = rowAura.gradient ?? bgGradient;
+    }
+    // The cosmic starfield tiles the whole IRC row.
+    final CosmeticAura? rowWatermarkAura = rowAuras
+        .where((a) => a.watermark != null)
+        .fold<CosmeticAura?>(null, (prev, a) => prev ?? a);
+
+    // PWA order: time, author, content; the 50px time column keeps left edges aligned.
+    final Widget? timeItem = settings.showTimestamps
+        ? ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 50),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _TimestampText(
+                  label: formatTime(message.dateTime, settings.timeFormat),
+                  fullTimestamp: formatFullTimestamp(message.dateTime,
+                      settings.timeFormat, settings.dateFormat),
+                  fontSize: 12,
+                  powEventId: message.id,
+                  powTarget: message.powTarget,
+                  copyPubkey: message.pubkey,
+                  // Public channel messages only; PM/group rows carry no mined work.
+                  powApplies: !message.isPM && !message.isGroup,
+                  detailNym: message.author,
+                  detailChannel: message.geohash ?? message.channel,
+                  detailCreatedAt: message.dateTime,
+                ),
+                if (_cryptoState != null)
+                  CryptoVerifiedBadge(state: _cryptoState!),
+                if (_pqState != null)
+                  CryptoPqBadge(
+                      state: _pqState!, coverage: message.pqCoverage),
+                if (message.viaMesh) _MeshBadge(color: context.nym.primary),
+              ],
+            ),
+          )
+        : null;
+    final authorItem = ConstrainedBox(
+      // No max-width: the author grows naturally and the row reflows around it.
+      constraints: const BoxConstraints(minWidth: 120),
+      child: RowTap(
+        onTap: () => _openContextMenu(context),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            NymAvatar(
+                seed: message.pubkey,
+                size: 18,
+                imageUrl: _authorPicture,
+                localOnly: message.localOnlyRow),
+            const SizedBox(width: 4),
+            Flexible(
+              child: _authorLine(
+                c,
+                self: self,
+                size: fontSize,
+                flairSize: 20,
+                brackets: true,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    // Content-targeted styles, watermarks and cosmetics decorate this box, not the row; reactions sit outside it.
+    Widget contentBody = KeyedSubtree(
+      key: _barAnchorKey,
+      child: _bodyContent(context, _bodyColor(c), fontSize, deco: deco),
+    );
+    // Frost's icy fill applies only when no message style is active.
+    Color? contentFill = deco?.contentBackgroundFor(bubble: false);
+    if (contentFill == null && !_styleClassActive) {
+      contentFill = contentAuras
+          .where((a) => a.background != null)
+          .fold<Color?>(null, (prev, a) => prev ?? a.background);
+    }
+    final styleWatermark = deco?.watermark;
+    final CosmeticAura? contentWatermarkAura = styleWatermark != null
+        ? null
+        : contentAuras
+            .where((a) => a.watermark != null)
+            .fold<CosmeticAura?>(null, (prev, a) => prev ?? a);
+    final contentWatermark = styleWatermark ?? contentWatermarkAura?.watermark;
+    final contentEdgeWatermark = contentWatermarkAura?.edgeWatermark ?? false;
+    final contentShadows = <BoxShadow>[
+      for (final a in contentAuras)
+        if (a.glowColorFor(bubble: false) != null &&
+            a.glowBlurFor(bubble: false) > 0)
+          BoxShadow(
+            color: a.glowColorFor(bubble: false)!,
+            blurRadius: a.glowBlurFor(bubble: false),
+          ),
+    ];
+    final contentOverlays = contentAuras.where((a) => a.hasOverlay).toList();
+    final contentOverlayAura =
+        contentOverlays.isNotEmpty ? contentOverlays.first : null;
+    if (contentFill != null ||
+        contentWatermark != null ||
+        contentShadows.isNotEmpty ||
+        contentOverlayAura != null ||
+        deco?.contentPadding != null) {
+      Widget inner = contentBody;
+      if (contentWatermark != null || contentOverlayAura != null) {
+        inner = Stack(
+          children: [
+            if (contentWatermark != null)
+              Positioned.fill(
+                  child: StyleWatermarkLayer(
+                      watermark: contentWatermark,
+                      edgeOnly: contentEdgeWatermark)),
+            contentBody,
+            if (contentOverlayAura != null)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: CosmeticOverlayPainter(
+                      aura: contentOverlayAura,
+                      radius: BorderRadius.zero,
+                      bubble: false,
+                      // Hologram fill and sheen drop when a style class is active; the ring and glow stay.
+                      styleActive: _styleClassActive,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      }
+      contentBody = Container(
+        width: widget.columnsMode ? double.infinity : null,
+        padding: deco?.contentPadding,
+        decoration: BoxDecoration(
+          color: contentFill,
+          boxShadow: contentShadows.isEmpty ? null : contentShadows,
+        ),
+        clipBehavior: (contentWatermark != null || contentOverlayAura != null)
+            ? Clip.antiAlias
+            : Clip.none,
+        child: inner,
+      );
+    }
+    final contentColumn = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        contentBody,
+        // Reactions row only when reactions or zaps exist; the add button appears only with existing reactions.
+        if (reactions.isNotEmpty || _hasZaps)
+          Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: _reactionsRow(context),
+          ),
+        if (_threadReplyCount > 0)
+          _threadIndicator(context, _threadReplyCount),
+      ],
+    );
+
+    // Full-width siblings (translation, readers) are hoisted out so they span the message; columns mode stacks the row.
+    final Widget messageRow;
+    if (widget.columnsMode) {
+      messageRow = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (timeItem != null) ...[
+            KeyedSubtree(key: _barLineKey, child: timeItem),
+            const SizedBox(height: 5),
+          ],
+          if (timeItem == null)
+            KeyedSubtree(key: _barLineKey, child: authorItem)
+          else
+            authorItem,
+          const SizedBox(height: 10),
+          SizedBox(width: double.infinity, child: contentColumn),
+        ],
+      );
+    } else {
+      messageRow = Wrap(
+        crossAxisAlignment: WrapCrossAlignment.start,
+        // CSS single-value gap applies to both axes.
+        spacing: 10,
+        runSpacing: 10,
+        children: [
+          ?timeItem,
+          authorItem,
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.of(context).size.width - 220,
+            ),
+            child: contentColumn,
+          ),
+        ],
+      );
+    }
+
+    final rowChildren = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        messageRow,
+        // Top-level sibling after the content, so it right-aligns across the whole row.
+        if (message.isEdited ||
+            (message.expiresAt != null &&
+                chatToolsKeptLookup(message.nymMessageId)))
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  KeptBadge(message: message),
+                  if (message.isEdited)
+                    EditedLabel(
+                      message: message,
+                      style: TextStyle(
+                        color: c.textDim.withValues(alpha: 0.7),
+                        fontSize: 10,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        if (_showTranslation)
+          MessageTranslation(
+            content: message.content,
+            targetLang: _translateLangOverride,
+          ),
+        if (_showReaderAvatars) _readerAvatars(context),
+        if (self) _deliveryFooter(context),
+        if (!self && message.optimistic) _sendAsFooter(context),
+      ],
+    );
+
+    final body = Padding(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      child: rowWatermarkAura != null
+          ? Stack(
+              children: [
+                Positioned.fill(
+                    child: StyleWatermarkLayer(
+                        watermark: rowWatermarkAura.watermark!,
+                        edgeOnly: rowWatermarkAura.edgeWatermark)),
+                rowChildren,
+              ],
+            )
+          : rowChildren,
+    );
+    // Row-aura inset rings are approximated by a 1px border; content rings are painted above.
+    final rowRing = rowAura?.insetColor;
+    final rowGlowColor = rowAura?.glowColorFor(bubble: false);
+    final rowGlowBlur = rowAura?.glowBlurFor(bubble: false) ?? 0;
+    final hasBg = bg != null || bgGradient != null;
+    final content = Container(
+      // Full-width so translation and reader rows line up across the message.
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: bgGradient == null ? bg : null,
+        gradient: bgGradient != null
+            ? LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: bgGradient,
+              )
+            : null,
+        borderRadius: hasBg ? NymRadius.rsm : null,
+        border: rowRing != null ? Border.all(color: rowRing, width: 1) : null,
+        boxShadow: (rowGlowColor != null && rowGlowBlur > 0)
+            ? [BoxShadow(color: rowGlowColor, blurRadius: rowGlowBlur)]
+            : null,
+      ),
+      clipBehavior: hasBg ? Clip.antiAlias : Clip.none,
+      child: barColor != null
+          ? Stack(
+              children: [
+                body,
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: FractionallySizedBox(
+                      heightFactor: 0.6,
+                      child: Container(
+                        width: 3,
+                        decoration: BoxDecoration(
+                          color: barColor,
+                          borderRadius: const BorderRadius.only(
+                            topRight: Radius.circular(3),
+                            bottomRight: Radius.circular(3),
+                          ),
+                          boxShadow: barGlow != null
+                              ? [BoxShadow(color: barGlow, blurRadius: 8)]
+                              : null,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : body,
+    );
+    // Prism/hologram/frost overlays are content-scoped and painted by the content box, not the row.
+    return _SwipeToAct(
+      settings: settings,
+      applies: _swipeApplies,
+      onAction: (a) => _dispatchSwipeAction(context, a),
+      onDoubleClick: _doubleClick,
+      // Quick-react popup anchored to the press point.
+      onLongPressStart: (d) => _onMessageLongPress(context, d.globalPosition),
+      onSecondaryTap: () => _openContextMenu(context),
+      onSecondaryClick: (at) => _secondaryClick(context, at),
+      swipeReactEmojiUrl: _swipeReactEmojiUrl,
+      child: content,
+    );
+  }
+
+  static Color _ghostSelfPlate(NymColors c) => c.solidUi
+      ? (c.isLight ? const Color(0xFFBBBBBB) : const Color(0xFF444444))
+      : (c.isLight ? const Color(0x24000000) : const Color(0x2EFFFFFF));
+
+  Widget _buildBubble(BuildContext context) {
+    final c = context.nym;
+    final fontSize = settings.textSize.toDouble();
+    final self = message.isOwn;
+    final deco = _styleDecoration(context);
+    final mentioned = _isMentionedRow();
+
+    final auras = _resolveAuras(context);
+    final lastAura = auras.isNotEmpty ? auras.last : null;
+    // Only gold's aura fills the bubble, and only without a style; ghost + solid-ui flattens translucent washes.
+    final ghostSolid = c.solidUi && settings.theme == NymThemeKey.ghost;
+    final bubbleGradient = (!ghostSolid &&
+            lastAura != null &&
+            lastAura.bubblePaintsGradient &&
+            !_styleClassActive)
+        ? lastAura.bubbleFillGradient
+        : null;
+    // Style fill wins via its bubble-layout resolution; self fire/ice (and rainbow under solid-ui) keep the self fill.
+    final selfFireIce = self &&
+        (_cosmetics.styleId == 'style-fire' ||
+            _cosmetics.styleId == 'style-ice' ||
+            (c.solidUi && _cosmetics.styleId == 'style-rainbow'));
+    // Solid-ui gold-aura plate applies to styled messages too; unstyled ones take it via [bubbleGradient].
+    Color? auraStyledFill;
+    for (final a in auras) {
+      auraStyledFill = a.bubbleStyledFill ?? auraStyledFill;
+    }
+    final Color bubbleColor;
+    if (ghostSolid &&
+        !selfFireIce &&
+        !(deco?.transparentBubble ?? false) &&
+        _cosmetics.styleId != 'style-eclipse' &&
+        _cosmetics.styleId != 'style-crt') {
+      // Only an unstyled or fire/ice/rainbow self bubble keeps the self gray under ghost-solid.
+      final flattenedToOther = _cosmetics.styleId == 'style-satoshi' ||
+          _cosmetics.supporter ||
+          auras.any((a) => a.id == 'cosmetic-aura-gold');
+      bubbleColor =
+          (self && !flattenedToOther) ? c.bubbleSelfBg : c.bubbleOtherBg;
+    } else if (selfFireIce) {
+      bubbleColor = c.solidUi ? c.bubbleSelfBg : c.primaryA(0.25);
+    } else if (_styleClassActive && auraStyledFill != null) {
+      bubbleColor = auraStyledFill;
+    } else {
+      bubbleColor = deco?.contentBackgroundFor(bubble: true) ??
+          (self && _cosmetics.styleId == 'style-ghost'
+              ? _ghostSelfPlate(c)
+              : null) ??
+          (_styleClassActive || self ? null : lastAura?.background) ??
+          (self ? c.bubbleSelfBg : c.bubbleOtherBg);
+    }
+    final radius = _bubbleRadius(self);
+
+    // Interior: body then the in-bubble time line; delivery ticks and translation are siblings below the bubble.
+    final timeLine = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (message.expiresAt != null &&
+            chatToolsKeptLookup(message.nymMessageId))
+          KeptBadge(message: message),
+        if (message.isEdited)
+          EditedLabel(
+            message: message,
+            trailingSpace: true,
+            style: TextStyle(
+                color: c.textDim.withValues(alpha: 0.7),
+                fontSize: 10,
+                fontStyle: FontStyle.italic),
+          ),
+        // Relative time, not clock; tapping opens the timestamp popup.
+        _TimestampText(
+          powEventId: message.id,
+          powTarget: message.powTarget,
+          copyPubkey: message.pubkey,
+          powApplies: !message.isPM && !message.isGroup,
+          detailNym: message.author,
+          detailChannel: message.geohash ?? message.channel,
+          detailCreatedAt: message.dateTime,
+          label: formatRelativeTime(message.dateTime),
+          fullTimestamp: formatFullTimestamp(
+              message.dateTime, settings.timeFormat, settings.dateFormat),
+          fontSize: 10,
+          height: 1,
+        ),
+        if (_cryptoState != null) CryptoVerifiedBadge(state: _cryptoState!),
+        if (_pqState != null)
+          CryptoPqBadge(state: _pqState!, coverage: message.pqCoverage),
+        if (message.viaMesh) _MeshBadge(color: context.nym.primary),
+      ],
+    );
+    final innerContent = _TimeFoot(
+      body: _bodyContent(context, _bodyColor(c), fontSize,
+          deco: deco, bubble: true),
+      time: timeLine,
+    );
+
+    _ensureRelativeTimer();
+
+    final bubble = LayoutBuilder(builder: (context, box) {
+      // Bubble min 180px, max 85% (90% at <=768px) of the row, not the screen; the min wins.
+      final screenW = MediaQuery.of(context).size.width;
+      final availW = box.maxWidth.isFinite ? box.maxWidth : screenW;
+      final pct = screenW <= NymDimens.mobileBreakpoint ? 0.90 : 0.85;
+      final capW = (widget.columnsMode && screenW > NymDimens.mobileBreakpoint
+              ? availW - kColumnsBubbleGutter
+              : availW * pct)
+          .clamp(180.0, double.infinity);
+      return ConstrainedBox(
+        constraints: BoxConstraints(minWidth: 180, maxWidth: capW),
+        child: _decorateBubble(
+          radius: radius,
+          bubbleColor: bubbleColor,
+          gradient: bubbleGradient,
+          auras: auras,
+          // Mention ring as a 1px inner border; solid-ui strokes the full secondary color.
+          mentionRing: mentioned
+              ? (c.solidUi ? c.secondary : c.secondaryA(c.isLight ? 0.2 : 0.25))
+              : null,
+          child: Padding(
+            // A style's own content padding (satoshi 10/15) outranks the bubble default.
+            padding:
+                deco?.contentPadding ?? const EdgeInsets.fromLTRB(12, 8, 12, 6),
+            // Re-assert the 180px floor on the interior so the pinned time hugs the right padding edge.
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                  minWidth: 180 - (deco?.contentPadding?.horizontal ?? 24)),
+              child: innerContent,
+            ),
+          ),
+        ),
+      );
+    });
+
+    // The stack stretches so translation/readers span it; shrink-wrapped items are re-aligned per side.
+    final sideAlign = self ? Alignment.centerRight : Alignment.centerLeft;
+    final stack = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (widget.showName && !widget.grouped)
+          Align(
+            alignment: sideAlign,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 2, left: 2, right: 2),
+              child: RowTap(
+                onTap: () => _openContextMenu(context),
+                child: _authorLine(
+                  c,
+                  self: self,
+                  size: 11,
+                  flairSize: 20,
+                ),
+              ),
+            ),
+          ),
+        Align(
+          alignment: sideAlign,
+          // Key the bubble itself so the group avatar aligns to it; in bubble mode only the bubble opens the thread.
+          child: KeyedSubtree(
+            key: widget.bubbleAnchorKey,
+            child: KeyedSubtree(
+              key: _barAnchorKey,
+              child: _threadTapEligible
+                  ? RowTap(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => openMessageThread(ref, message,
+                          storageKey: widget.scrollKey, silent: true),
+                      child: bubble,
+                    )
+                  : bubble,
+            ),
+          ),
+        ),
+        // Delivery ticks sit on their own right-aligned line below the bubble, as in IRC.
+        if (self) _deliveryFooter(context),
+        if (!self && message.optimistic) _sendAsFooter(context),
+        if (_showTranslation)
+          MessageTranslation(
+            content: message.content,
+            targetLang: _translateLangOverride,
+          ),
+        if (_showReaderAvatars) _readerAvatars(context),
+        if (reactions.isNotEmpty || _hasZaps)
+          Align(
+            alignment: sideAlign,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 5),
+              child: _reactionsRow(context),
+            ),
+          ),
+        if (_threadReplyCount > 0)
+          Align(
+            alignment: sideAlign,
+            child: _threadIndicator(context, _threadReplyCount),
+          ),
+      ],
+    );
+
+    // Bubble mode also paints a faint gold wash across the whole row for gold-aura users, in both themes.
+    Widget rowStack = stack;
+    if (auras.any((a) => a.id == 'cosmetic-aura-gold')) {
+      rowStack = DecoratedBox(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0x0DFFD700),
+              Color(0x00FFD700),
+            ],
+          ),
+        ),
+        child: stack,
+      );
+    }
+
+    // The whole row (name, bubble, extras) slides with a swipe, like the PWA.
+    final swiped = _SwipeToAct(
+      settings: settings,
+      applies: _swipeApplies,
+      onAction: (a) => _dispatchSwipeAction(context, a),
+      onDoubleClick: _doubleClick,
+      // Quick-react popup anchored to the press point.
+      onLongPressStart: (d) => _onMessageLongPress(context, d.globalPosition),
+      onSecondaryTap: () => _openContextMenu(context),
+      onSecondaryClick: (at) => _secondaryClick(context, at),
+      avatarDx: widget.swipeAvatarDx,
+      swipeReactEmojiUrl: _swipeReactEmojiUrl,
+      child: rowStack,
+    );
+
+    // Snap-in overshoot entrance for a newly appended grouped bubble; disabled under reduced motion.
+    Widget rowBody = swiped;
+    if (_snapIn && !MediaQuery.of(context).disableAnimations) {
+      rowBody = _BubbleSnapIn(self: self, child: rowBody);
+    }
+
+    // Negative CSS margins can't be expressed between list items, so gaps are driven from the top edge.
+    final vPad = EdgeInsets.only(top: widget.grouped ? 2 : 6);
+
+    // Inside a [MessageGroup], emit only the content stack; the group owns padding and the avatar.
+    if (widget.inGroup) {
+      return Padding(padding: vPad, child: rowBody);
+    }
+
+    // Standalone path (not via [MessageGroup]) with its own 32px avatar.
+    final row = Row(
+      mainAxisAlignment: self ? MainAxisAlignment.end : MainAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        if (!self) ...[
+          SizedBox(
+            width: 32,
+            child: widget.showAvatar
+                ? RowTap(
+                    excludeFromSemantics: true,
+                    onTap: () => _openContextMenu(context),
+                    child: NymAvatar(
+                        seed: message.pubkey,
+                        size: 32,
+                        imageUrl: _authorPicture,
+                        localOnly: message.localOnlyRow),
+                  )
+                : const SizedBox.shrink(),
+          ),
+          const SizedBox(width: 6),
+        ],
+        Flexible(child: rowBody),
+      ],
+    );
+    return Padding(
+      padding:
+          EdgeInsets.fromLTRB(self ? 14 : 6, widget.grouped ? 2 : 6, 14, 0),
+      child: row,
+    );
+  }
+
+  /// Aura shadows, gradient, watermark and overlays around the bubble, clipped to [radius].
+  Widget _decorateBubble({
+    required BorderRadius radius,
+    required Color bubbleColor,
+    required List<Color>? gradient,
+    required List<CosmeticAura> auras,
+    required Widget child,
+    Color? mentionRing,
+  }) {
+    // No box-shadow from the style: its glow is a text-shadow, and a BoxShadow bleeds through the fill.
+    final shadows = <BoxShadow>[];
+    for (final a in auras) {
+      final blur = a.glowBlurFor(bubble: true);
+      final glowColor = a.glowColorFor(bubble: true);
+      if (glowColor != null && blur > 0) {
+        shadows.add(BoxShadow(color: glowColor, blurRadius: blur));
+      }
+    }
+    // Skip the border when the overlay painter already strokes the ring, or it doubles.
+    final lastAura = auras.isNotEmpty ? auras.last : null;
+    final inset = (lastAura != null &&
+            lastAura.insetColor != null &&
+            !lastAura.hasOverlay)
+        ? lastAura
+        : null;
+
+    // The cosmic starfield tiles only without a style; frost's edge snowflakes have no such gate.
+    final styleWatermark = _styleDecoration(context)?.watermark;
+    final CosmeticAura? auraWatermark = styleWatermark != null
+        ? null
+        : auras
+            .where((a) =>
+                a.watermark != null && (a.edgeWatermark || !_styleClassActive))
+            .fold<CosmeticAura?>(null, (prev, a) => prev ?? a);
+    final watermark = styleWatermark ?? auraWatermark?.watermark;
+    final edgeWatermark = auraWatermark?.edgeWatermark ?? false;
+
+    final overlays = auras.where((a) => a.hasOverlay).toList();
+    final overlayAura = overlays.isNotEmpty ? overlays.first : null;
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: gradient == null ? bubbleColor : null,
+        gradient: gradient != null
+            ? LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: gradient,
+              )
+            : null,
+        borderRadius: radius,
+        border: inset?.insetColor != null
+            ? Border.all(color: inset!.insetColor!, width: inset.insetWidth)
+            : (mentionRing != null
+                ? Border.all(color: mentionRing, width: 1)
+                : null),
+        boxShadow: shadows.isEmpty ? null : shadows,
+      ),
+      child: ClipRRect(
+        borderRadius: radius,
+        child: Stack(
+          children: [
+            if (watermark != null)
+              Positioned.fill(
+                  child: StyleWatermarkLayer(
+                      watermark: watermark, edgeOnly: edgeWatermark)),
+            child,
+            if (overlayAura != null)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: CosmeticOverlayPainter(
+                      aura: overlayAura,
+                      radius: radius,
+                      // Hologram fill and sheen drop when a style class is active; the ring and glow stay.
+                      styleActive: _styleClassActive,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Own channel or group message with readers shows reader avatars instead of the PM tick.
+  bool get _showReaderAvatars =>
+      message.isOwn &&
+      !message.isPM &&
+      (message.isGroup || _isChannelMessage) &&
+      _visibleReaders.isNotEmpty;
+
+  Map<String, String> get _visibleReaders {
+    if (message.readers.isEmpty) return message.readers;
+    final app = ref.read(appStateProvider);
+    return {
+      for (final e in message.readers.entries)
+        if (!app.isPersonHidden(e.key, e.value)) e.key: e.value
+    };
+  }
+
+  /// Named channels also carry read receipts natively, so they qualify alongside geohash channels.
+  bool get _isChannelMessage {
+    if (message.isPM || message.isGroup) return false;
+    if ((message.geohash ?? '').isEmpty && (message.channel ?? '').isEmpty) {
+      return false;
+    }
+    return RegExp(r'^[0-9a-f]{64}$', caseSensitive: false).hasMatch(message.id);
+  }
+
+  /// Up to 3 overlapping reader avatars plus `+N`; long-press opens a "seen by" modal.
+  Widget _readerAvatars(BuildContext context) {
+    const maxVisible = 3;
+    final entries = _visibleReaders.entries.toList();
+    final visible = entries.take(maxVisible).toList();
+    final overflow = entries.length - visible.length;
+    final c = context.nym;
+    ref.watch(usersProvider.select((u) => [
+          for (final e in visible) '${u[e.key]?.profile?.picture}',
+        ].join('\u0001')));
+    final users = ref.read(usersProvider);
+    // The Builder wraps only the avatars, since the modal anchors to its context's render box.
+    return Padding(
+      padding: const EdgeInsets.only(top: 3, right: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        mainAxisSize: MainAxisSize.max,
+        children: [
+          Builder(
+            builder: (avatarContext) => HoverOpenRegion(
+              key: _readersHoverKey,
+              open: (inside) =>
+                  _showSeenBy(avatarContext, onPointerInside: inside),
+              child: GestureDetector(
+              onLongPress: () {
+                if (_readersHoverKey.currentState?.pinIfOpen() ?? false) {
+                  return;
+                }
+                Haptics.selection();
+                _showSeenBy(avatarContext);
+              },
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 0; i < visible.length; i++)
+                    Transform.translate(
+                      offset: Offset(i == 0 ? 0 : -5.0 * i, 0),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(color: c.bg, width: 1.5),
+                        ),
+                        child: Opacity(
+                          opacity: 0.85,
+                          child: NymAvatar(
+                            seed: visible[i].key,
+                            size: 14,
+                            imageUrl: users[visible[i].key]?.profile?.picture,
+                          ),
+                        ),
+                      ),
+                    ),
+                  if (overflow > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 3),
+                      child: Text(
+                        '+${abbreviateNumber(overflow)}',
+                        style: TextStyle(
+                            color: c.textDim, fontSize: 9, height: 14 / 9),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  ReactorsModalHandle _showSeenBy(BuildContext context,
+      {ValueChanged<bool>? onPointerInside}) {
+    final users = ref.read(usersProvider);
+    final reactors = <ReactorEntry>[
+      for (final e in _visibleReaders.entries)
+        ReactorEntry(
+          pubkey: e.key,
+          nym: pickDisplayNym(users[e.key]?.nym, e.value),
+          suffix: getPubkeySuffix(e.key),
+          imageUrl: users[e.key]?.profile?.picture,
+        ),
+    ];
+    return showReactorsModal(
+      context,
+      onPointerInside: onPointerInside,
+      anchorRect: _globalRectOfContext(context) ?? Rect.zero,
+      emoji: '',
+      title:
+          tr('Seen by {count}', {'count': abbreviateNumber(reactors.length)}),
+      reactors: reactors,
+      onTapReactor: (r) => _openReactorContextMenu(context, r),
+    );
+  }
+
+  Widget _reactionsRow(BuildContext context) {
+    return Wrap(
+      spacing: 5,
+      runSpacing: 5,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        ZapBadge(message: message),
+        for (final r in reactions)
+          _ReactionBadge(
+            key: _badgeKeys.putIfAbsent(r.emoji, GlobalKey.new),
+            messageId: message.id,
+            reaction: r,
+            onTap: (rect) => _toggleReaction(context, r),
+            onLongPress: (rect) => _showReactors(context, r, rect),
+            onHoverOpen: (rect, inside) => _showReactors(context, r, rect,
+                haptic: false, onPointerInside: inside),
+          ),
+        // The add-reaction button appears only on rows that already have reactions.
+        if (reactions.isNotEmpty && widget.onReactionPicker != null)
+          _AddReactionButton(
+            onTap: () => widget.onReactionPicker?.call(message),
+          ),
+      ],
+    );
+  }
+
+  void _toggleReaction(BuildContext context, MessageReaction r) {
+    final controller = ref.read(nostrControllerProvider);
+    final view = ref.read(currentViewProvider);
+    final kind = inferOriginalKind(message, view: view);
+    final wasReacted = r.userReacted;
+    // The optimistic local update is synchronous; publishing continues unawaited.
+    unawaited(controller.toggleReaction(
+      message.id,
+      r.emoji,
+      target: reactionTargetFor(message),
+      kind: kind,
+    ));
+    // Buzz and burst on add as soon as it lands locally; a rate-limited toggle stays silent.
+    if (!wasReacted && _selfReactedLocally(r.emoji)) {
+      Haptics.light();
+      // Post-frame so the badge is laid out; falls back to the message center.
+      ReactionBurst.playAtBadge(context, message.id, r.emoji,
+          fallbackCenter: _globalCenterOfContext(context));
+    }
+  }
+
+  bool _selfReactedLocally(String emoji) {
+    final list = ref.read(appStateProvider).reactions[message.id] ?? const [];
+    return list.any((x) => x.emoji == emoji && x.userReacted);
+  }
+
+  ReactorsModalHandle _showReactors(
+      BuildContext context, MessageReaction r, Rect rect,
+      {bool haptic = true, ValueChanged<bool>? onPointerInside}) {
+    if (haptic) Haptics.selection();
+    final app = ref.read(appStateProvider);
+    final users = ref.read(usersProvider);
+    final map =
+        ref.read(appStateProvider.notifier).reactorsFor(message.id, r.emoji) ??
+            const {};
+    // Resolve missing reactor avatars; faces fill in on the next open.
+    ref.read(nostrControllerProvider).ensureProfiles(map.keys);
+    final reactors = <ReactorEntry>[
+      for (final e in map.entries)
+        ReactorEntry(
+          pubkey: e.key,
+          nym: pickDisplayNym(users[e.key]?.nym, e.value),
+          suffix: getPubkeySuffix(e.key),
+          isYou: e.key == app.selfPubkey,
+          imageUrl: users[e.key]?.profile?.picture,
+        ),
+    ];
+    return showReactorsModal(
+      context,
+      onPointerInside: onPointerInside,
+      anchorRect: rect,
+      emoji: r.emoji,
+      reactors: reactors,
+      onTapReactor: (entry) => _openReactorContextMenu(context, entry),
+    );
+  }
+
+  /// Opens a reactor/reader's user context menu, not profile-only and without a message.
+  void _openReactorContextMenu(BuildContext context, ReactorEntry r) {
+    final app = ref.read(appStateProvider);
+    ContextMenuPanel.show(
+      context,
+      target: CtxTarget(
+        pubkey: r.pubkey,
+        nym: r.nym,
+        isSelf: r.pubkey == app.selfPubkey,
+      ),
+    );
+  }
+
+  List<QuickContextItem> _sheetItems(BuildContext context) =>
+      buildQuickContextItems(
+        context,
+        ref,
+        message,
+        onTranslate: _showTranslated,
+        onEdit: () => ref.read(pendingEditProvider.notifier).request(
+              messageId: message.id,
+              content: message.content,
+            ),
+        onThread: _barThreadable
+            ? () =>
+                openMessageThread(ref, message, storageKey: widget.scrollKey)
+            : null,
+      );
+
+  void _runBarAction(BuildContext context, String id) {
+    if (id == 'react') {
+      widget.onReactionPicker?.call(message);
+      return;
+    }
+    for (final item in _sheetItems(context)) {
+      if (item.id == id) {
+        item.onTap();
+        return;
+      }
+    }
+  }
+
+  void _onMessageLongPress(BuildContext context, Offset at) {
+    Haptics.selection();
+    final rect = Rect.fromCenter(center: at, width: 0, height: 0);
+    final recents = ref.read(visibleRecentEmojisProvider);
+    final emojis = quickReactEmojis(recents);
+    final items = _sheetItems(context);
+    final picker = widget.onReactionPicker;
+    final onMore = picker == null ? null : () => picker(message);
+    if (messageSheetFits(
+        width: MediaQuery.sizeOf(context).width,
+        mouse: PointerInput.mouseOf(context))) {
+      final nym = _baseNym(_displayNym());
+      showMessageActionSheet(
+        context,
+        preview: MessageSheetPreview(
+          pubkey: message.pubkey,
+          nym: nym,
+          suffix: message.pubkey.isEmpty ? '' : getPubkeySuffix(message.pubkey),
+          time: formatTime(message.dateTime, settings.timeFormat),
+          content: message.content,
+          avatarUrl: ref.read(usersProvider)[message.pubkey]?.profile?.picture,
+        ),
+        emojis: emojis,
+        onReact: (emoji) => _quickReact(context, emoji),
+        onMore: onMore,
+        items: items,
+      );
+      return;
+    }
+    showQuickReactPopup(
+      context,
+      anchorRect: rect,
+      spotlightRect: _globalRectOfContext(context),
+      emojis: emojis,
+      onReact: (emoji) => _quickReact(context, emoji),
+      onMore: onMore ?? () {},
+      contextItems: items,
+    );
+  }
+
+  void _quickReact(BuildContext context, String emoji) {
+    final controller = ref.read(nostrControllerProvider);
+    final view = ref.read(currentViewProvider);
+    final already = _selfReactedLocally(emoji) ||
+        reactions.any((r) => r.emoji == emoji && r.userReacted);
+    ref.read(recentEmojisProvider.notifier).record(emoji);
+    if (already) return;
+    unawaited(controller.toggleReaction(
+      message.id,
+      emoji,
+      target: reactionTargetFor(message),
+      kind: inferOriginalKind(message, view: view),
+    ));
+    if (_selfReactedLocally(emoji)) {
+      Haptics.light();
+      ReactionBurst.playAtBadge(context, message.id, emoji,
+          fallbackCenter: _globalCenterOfContext(context));
+    }
+  }
+
+  /// Custom-emoji image URL for a known `:shortcode:` swipe emoji; null uses the text glyph.
+  String? get _swipeReactEmojiUrl {
+    final m =
+        RegExp(r'^:([a-zA-Z0-9_]+):$').firstMatch(settings.swipeReactEmoji);
+    if (m == null) return null;
+    final code = m.group(1)!;
+    if (ref.watch(hiddenEmojiProvider.select((h) => h.code(code)))) return null;
+    return ref.watch(liveCustomEmojiProvider.select((s) => s.codeToUrl[code]));
+  }
+
+  bool _swipeApplies(String action) {
+    final self = ref.read(appStateProvider).selfPubkey;
+    return swipeActionApplies(
+      action,
+      MsgActionFacts(
+        isSelf: message.isOwn ||
+            (message.pubkey.isNotEmpty && message.pubkey == self),
+        hasId: message.id.isNotEmpty,
+        hasContent: message.content.isNotEmpty,
+        hasAuthor: message.pubkey.isNotEmpty,
+      ),
+    );
+  }
+
+  /// Runs the committed swipe action through the same paths as the long-press menu.
+  void _dispatchSwipeAction(BuildContext context, String action) {
+    final controller = ref.read(nostrControllerProvider);
+    // Use the displayed nym, not the one frozen on the message.
+    final baseNym = _baseNym(_displayNym());
+    final fullNym = '$baseNym#${getPubkeySuffix(message.pubkey)}';
+    switch (action) {
+      case 'quote':
+        if (message.content.isEmpty) return;
+        ref
+            .read(pendingComposerActionProvider.notifier)
+            .requestQuote(
+                fullNym: fullNym,
+                content: message.content,
+                messageId: message.id);
+        return;
+      case 'translate':
+        if (message.content.isEmpty) return;
+        _showTranslated();
+        return;
+      case 'copy':
+        if (message.content.isEmpty) return;
+        Clipboard.setData(ClipboardData(
+            text: ref.read(appStateProvider).shownContent(message)));
+        showToast(tr('Message copied to clipboard'));
+        return;
+      case 'react':
+        _quickReact(context, settings.swipeReactEmoji);
+        return;
+      case 'zap':
+        if (message.pubkey.isEmpty) return;
+        // Zapping your own message prints a notice instead of silently no-opping.
+        if (message.isOwn) {
+          showToast(tr('Cannot zap your own message'));
+          return;
+        }
+        _zapMessage(context, baseNym);
+        return;
+      case 'slap':
+        if (message.isOwn || message.pubkey.isEmpty) return;
+        controller.sendCurrent(
+            '/me slaps @$fullNym around a bit with a large trout 🐟');
+        return;
+      case 'hug':
+        if (message.isOwn || message.pubkey.isEmpty) return;
+        controller.sendCurrent('/me gives @$fullNym a warm hug 🫂');
+        return;
+      case 'none':
+      default:
+        return;
+    }
+  }
+
+  /// Posts a checking note, resolves the LN address fresh (not just cache), then opens the modal or reports failure.
+  Future<void> _zapMessage(BuildContext context, String baseNym) async {
+    showToast(tr(kPaymentsDisabled));
+  }
+
+  /// Shared by desktop double-click and the swipe `quote` action.
+  void _quoteReply() {
+    if (message.content.isEmpty) return;
+    final baseNym = _baseNym(_displayNym());
+    final fullNym = '$baseNym#${getPubkeySuffix(message.pubkey)}';
+    ref.read(pendingComposerActionProvider.notifier).requestQuote(
+        fullNym: fullNym, content: message.content, messageId: message.id);
+  }
+
+  void _openContextMenu(BuildContext context) {
+    final app = ref.read(appStateProvider);
+    final target = ctxTargetForMessage(message,
+        selfPubkey: app.selfPubkey, liveNym: app.users[message.pubkey]?.nym);
+    ContextMenuPanel.show(
+      context,
+      target: target,
+      message: message,
+      onReact: () => widget.onReactionPicker?.call(message),
+      onTranslateInline: (lang) => _showTranslated(lang: lang),
+    );
+  }
+
+  Rect? _globalRectOfContext(BuildContext context) {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    final origin = box.localToGlobal(Offset.zero);
+    return origin & box.size;
+  }
+
+  Offset? _globalCenterOfContext(BuildContext context) {
+    final r = _globalRectOfContext(context);
+    return r?.center;
+  }
+
+  // Only a trailing `#xxxx` is stripped; a `#` inside the name belongs to it.
+  String _baseNym(String nym) => splitNymSuffix(nym).base;
+
+  /// Read, not watched, so action paths can call it outside build.
+  String _displayNym() {
+    final live = ref.read(appStateProvider).users[message.pubkey]?.nym;
+    return pickDisplayNym(live, message.author);
+  }
+
+  BorderRadius _bubbleRadius(bool self) {
+    const r = Radius.circular(16);
+    const tail = Radius.circular(4);
+    if (widget.grouped) return const BorderRadius.all(r);
+    if (self) {
+      return const BorderRadius.only(
+        topLeft: r,
+        topRight: tail,
+        bottomLeft: r,
+        bottomRight: r,
+      );
+    }
+    return const BorderRadius.only(
+      topLeft: tail,
+      topRight: r,
+      bottomLeft: r,
+      bottomRight: r,
+    );
+  }
+
+  /// Never for own messages; otherwise per `blurOthersImages` (always, or only non-friends).
+  bool _shouldBlurImages() {
+    if (message.isOwn) return false;
+    final setting = ref.read(settingsProvider.notifier).blurImages;
+    if (setting == 'true') return true;
+    if (setting == 'friends') {
+      return !ref.read(appStateProvider).isFriend(message.pubkey);
+    }
+    return false;
+  }
+
+  Widget _content(
+    BuildContext context,
+    Color color,
+    double fontSize, {
+    MessageStyleDecoration? deco,
+    bool bubble = false,
+  }) =>
+      ConstrainedBox(
+        key: const ValueKey('messageReadCap'),
+        constraints: BoxConstraints(maxWidth: readWidthPx(fontSize)),
+        child: NymBareSuffixScope(
+          enabled: message.isBot ||
+              ref.read(nostrControllerProvider).isVerifiedBot(message.pubkey),
+          child: _longToggle(
+              _contentBody(context, color, fontSize,
+                  deco: deco, bubble: bubble),
+              color,
+              fontSize),
+        ),
+      );
+
+  bool _longOpen = false;
+
+  Widget _longToggle(Widget body, Color color, double fontSize) {
+    if (!message.isOwn ||
+        !message.isPM ||
+        LongText.collapsedHead(message.content) == null) {
+      return body;
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        body,
+        TextButton(
+          key: const ValueKey('pmLongToggle'),
+          onPressed: () => setState(() => _longOpen = !_longOpen),
+          child: Text(_longOpen ? tr('Show less') : tr('Show more'),
+              style: TextStyle(color: color, fontSize: fontSize * 0.9)),
+        ),
+      ],
+    );
+  }
+
+  Widget _contentBody(
+    BuildContext context,
+    Color color,
+    double fontSize, {
+    MessageStyleDecoration? deco,
+    bool bubble = false,
+  }) {
+    final blur = _shouldBlurImages();
+    final longHead = message.isOwn && message.isPM && !_longOpen
+        ? LongText.collapsedHead(message.content)
+        : null;
+    var displayContent = longHead ?? message.content;
+    // Only the synthetic Nymbot welcome row is app copy and gets translated; everything else renders as authored.
+    if (message.id.startsWith(kNymbotWelcomeIdPrefix)) {
+      displayContent = localizeBotWelcome(message.id, displayContent);
+    }
+    final botAuthored = message.isBot ||
+        ref.read(nostrControllerProvider).isVerifiedBot(message.pubkey);
+    // Show bot command names in the vocabulary this device accepts.
+    if (botAuthored) {
+      displayContent = localizeCommandTokensIn(displayContent);
+    }
+    final body = MessageContent(
+      content: displayContent,
+      commonMark: botAuthored,
+      spoilers: _spoilers,
+      baseColor: deco?.textColorFor(bubble: bubble) ?? color,
+      fontSize: fontSize,
+      blurImages: blur,
+      glyphShadows: deco?.textShadows,
+      monospace: deco?.monospace ?? false,
+      // Lets a tapped blockquote exclude the host message when finding its source.
+      hostMessageId: message.id,
+      scrollKey: widget.scrollKey,
+      quoted: message.quoted,
+    );
+    final gradient = deco?.gradient;
+    if (gradient != null && gradient.length >= 2) {
+      // srcIn would clip a glyph shadow away, so the aurora glow is a separate shadow-only copy underneath.
+      final clipped = ShaderMask(
+        blendMode: BlendMode.srcIn,
+        shaderCallback: (rect) => LinearGradient(
+          begin: const Alignment(-0.87, 0.5),
+          end: const Alignment(0.87, -0.5),
+          colors: gradient,
+        ).createShader(rect),
+        child: MessageContent(
+          content: displayContent,
+          commonMark: botAuthored,
+          spoilers: _spoilers,
+          baseColor: Colors.white,
+          fontSize: fontSize,
+          blurImages: blur,
+          hostMessageId: message.id,
+          scrollKey: widget.scrollKey,
+          quoted: message.quoted,
+        ),
+      );
+      final glow = deco?.gradientGlow;
+      if (glow == null) return clipped;
+      return Stack(
+        children: [
+          MessageContent(
+            content: displayContent,
+            commonMark: botAuthored,
+            spoilers: _spoilers,
+            baseColor: const Color(0x00000000),
+            fontSize: fontSize,
+            blurImages: false,
+            glyphShadows: [glow],
+            quoted: message.quoted,
+          ),
+          clipped,
+        ],
+      );
+    }
+    return body;
+  }
+
+  Widget _deliveryFooter(BuildContext context) {
+    return ListenableBuilder(
+      listenable: QueuedSends.instance,
+      builder: (context, _) {
+        final q = QueuedSends.instance;
+        if (q.hasQueued &&
+            (q.isQueued(message.id) || q.isQueued(message.nymMessageId))) {
+          return _queuedTag(context);
+        }
+        if (message.isPM && !message.isGroup) return _deliveryTicks(context);
+        return const SizedBox.shrink();
+      },
+    );
+  }
+
+  Widget _sendAsFooter(BuildContext context) {
+    final c = context.nym;
+    final failed = message.deliveryStatus == DeliveryStatus.failed;
+    if (!failed && message.deliveryStatus != DeliveryStatus.sending) {
+      return const SizedBox.shrink();
+    }
+    final nym = getNymFromPubkey(message.author, message.pubkey);
+    final note = NymText(
+      failed
+          ? tr(SendAsStrings.failedShort, {'nym': nym})
+          : tr(SendAsStrings.sending, {'nym': nym}),
+      known: [message.pubkey],
+      style: TextStyle(
+        color: failed ? c.danger : c.textDim,
+        fontSize: 11,
+      ),
+    );
+    if (!failed) {
+      return Padding(
+        key: const ValueKey('msgSendAsTag'),
+        padding: const EdgeInsets.only(top: 2),
+        child: note,
+      );
+    }
+    final hooks = ref.read(pendingComposerActionProvider.notifier);
+    final id = message.id;
+    Widget act(String key, String label, VoidCallback onTap) => Semantics(
+          button: true,
+          child: InkWell(
+            key: ValueKey('sendAsAct-$key'),
+            onTap: onTap,
+            borderRadius: NymRadius.rsm,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: c.danger,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  decoration: TextDecoration.underline,
+                  decorationColor: c.danger,
+                ),
+              ),
+            ),
+          ),
+        );
+    return Padding(
+      key: const ValueKey('msgSendAsTag'),
+      padding: const EdgeInsets.only(top: 2),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 10,
+        children: [
+          note,
+          act('retry', tr('Retry'), () => hooks.requestSendAsRetry(id)),
+          act('copy', tr('Copy'), () {
+            final text =
+                ComposerDrafts.failedSendAs[id]?.composed ?? message.content;
+            unawaited(Clipboard.setData(ClipboardData(text: text)));
+            showToast(tr('Copied!'), kind: ToastKind.success);
+          }),
+          act('putBack', tr(SendAsStrings.putBack),
+              () => hooks.requestSendAsPutBack(id)),
+        ],
+      ),
+    );
+  }
+
+  Widget _queuedTag(BuildContext context) {
+    return Padding(
+      key: const ValueKey('msgQueuedTag'),
+      padding: const EdgeInsets.only(top: 2, right: 4),
+      child: Align(
+        alignment: Alignment.centerRight,
+        child: Text(
+          tr(ComposerConnStrings.queued),
+          style: TextStyle(color: context.nym.textDim, fontSize: 11),
+        ),
+      ),
+    );
+  }
+
+  Widget _deliveryTicks(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, right: 4),
+      child: Align(
+        alignment: Alignment.centerRight,
+        child: _ticksGlyph(context),
+      ),
+    );
+  }
+
+  Widget _ticksGlyph(BuildContext context) {
+    final c = context.nym;
+    // PWA delivery glyphs: read ✓✓ blue, delivered ✓ green, sent ✓ dim, failed ! red.
+    IconData glyph;
+    Color color;
+    switch (message.deliveryStatus) {
+      case DeliveryStatus.read:
+        glyph = Icons.done_all;
+        color = const Color(0xFF2196F3);
+        break;
+      case DeliveryStatus.delivered:
+        glyph = Icons.done;
+        color = const Color(0xFF4CAF50);
+        break;
+      case DeliveryStatus.sent:
+        glyph = Icons.done;
+        color = c.textDim;
+        break;
+      case DeliveryStatus.failed:
+        // The failed `!` is a tap-to-retry affordance.
+        return MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: RowTap(
+            behavior: HitTestBehavior.opaque,
+            onTap: _retryFailedPm,
+            child: NymTooltip(
+              message: tr('Failed to send - click to retry'),
+              child: Text(
+                '!',
+                style: TextStyle(
+                  color: c.danger,
+                  fontSize: 10,
+                  height: 1,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        );
+      case DeliveryStatus.sending:
+        return const SizedBox.shrink();
+    }
+    return Icon(glyph, size: 12, color: color);
+  }
+
+  /// Drops the failed bubble and sends a fresh copy to the stored peer (or the active PM peer).
+  void _retryFailedPm() {
+    final content = message.content;
+    if (content.trim().isEmpty) return;
+    final view = ref.read(currentViewProvider);
+    final peer = message.conversationPubkey ??
+        (view.kind == ViewKind.pm ? view.id : null);
+    if (peer == null || peer.isEmpty) return;
+    final appState = ref.read(appStateProvider.notifier);
+    final controller = ref.read(nostrControllerProvider);
+    // Remove first so the retry produces a single fresh echo.
+    appState.removeMessage(message.id);
+    // `sendCurrent` publishes to the current view, so switch to the PM thread first.
+    controller.startPM(peer);
+    controller.sendCurrent(content);
+  }
+}
+
+/// A reaction badge: tap toggles, long-press shows reactors; no hover tooltip, as in the PWA.
+class _ReactionBadge extends StatefulWidget {
+  const _ReactionBadge({
+    super.key,
+    required this.messageId,
+    required this.reaction,
+    required this.onTap,
+    required this.onLongPress,
+    required this.onHoverOpen,
+  });
+  final String messageId;
+  final MessageReaction reaction;
+  final void Function(Rect) onTap;
+  final void Function(Rect) onLongPress;
+  final ReactorsModalHandle Function(Rect, ValueChanged<bool>) onHoverOpen;
+
+  @override
+  State<_ReactionBadge> createState() => _ReactionBadgeState();
+}
+
+class _ReactionBadgeState extends State<_ReactionBadge> {
+  bool _pressed = false;
+  bool _hover = false;
+
+  /// Registered with [ReactionBurst] so bursts anchor at this badge.
+  final GlobalKey _anchorKey = GlobalKey();
+  final GlobalKey<HoverOpenRegionState> _hoverKey =
+      GlobalKey<HoverOpenRegionState>();
+
+  int _lastCount = -1;
+  bool _lastUserReacted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    ReactionBurst.registerBadge(
+        widget.messageId, widget.reaction.emoji, _anchorKey);
+    _lastCount = widget.reaction.count;
+    _lastUserReacted = widget.reaction.userReacted;
+  }
+
+  @override
+  void didUpdateWidget(covariant _ReactionBadge old) {
+    super.didUpdateWidget(old);
+    if (old.messageId != widget.messageId ||
+        old.reaction.emoji != widget.reaction.emoji) {
+      ReactionBurst.unregisterBadge(
+          old.messageId, old.reaction.emoji, _anchorKey);
+      ReactionBurst.registerBadge(
+          widget.messageId, widget.reaction.emoji, _anchorKey);
+      _lastCount = widget.reaction.count;
+      _lastUserReacted = widget.reaction.userReacted;
+      return;
+    }
+    // Burst when another user's live reaction increments the badge; own adds burst from the toggle paths.
+    final r = widget.reaction;
+    if (_lastCount >= 0 &&
+        r.count > _lastCount &&
+        r.userReacted == _lastUserReacted) {
+      ReactionBurst.playAtBadge(context, widget.messageId, r.emoji);
+    }
+    _lastCount = r.count;
+    _lastUserReacted = r.userReacted;
+  }
+
+  @override
+  void dispose() {
+    ReactionBurst.unregisterBadge(
+        widget.messageId, widget.reaction.emoji, _anchorKey);
+    super.dispose();
+  }
+
+  Rect _rect(BuildContext context) {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return Rect.zero;
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
+  /// Only a whole-string `:shortcode:` can render as a custom-emoji image.
+  static final RegExp _rxWholeToken = RegExp(r'^:([a-zA-Z0-9_]+):$');
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final r = widget.reaction;
+    final Widget badge = RawGestureDetector(
+      key: _anchorKey,
+      gestures: <Type, GestureRecognizerFactory>{
+        TapGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+          () => TapGestureRecognizer(debugOwner: this),
+          (rec) => rec
+            ..onTap = () {
+              _hoverKey.currentState?.closeHover();
+              widget.onTap(_rect(context));
+            }
+            ..onTapDown = ((_) => setState(() => _pressed = true))
+            ..onTapUp = ((_) => setState(() => _pressed = false))
+            ..onTapCancel = (() => setState(() => _pressed = false)),
+        ),
+        _TightLongPressGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+            _TightLongPressGestureRecognizer>(
+          () => _TightLongPressGestureRecognizer(debugOwner: this),
+          (rec) => rec
+            ..onLongPressStart = (_) {
+              if (_hoverKey.currentState?.pinIfOpen() ?? false) return;
+              widget.onLongPress(_rect(context));
+            },
+        ),
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+          child: EasedScale(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.ease,
+            scale: _pressed ? 0.95 : (_hover ? 1.05 : 1.0),
+            child: EasedContainer(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.ease,
+              boxKey: const ValueKey('reactionChip'),
+              constraints: context.largeTouchTargets
+                  ? const BoxConstraints(minHeight: 32)
+                  : null,
+              alignment: context.largeTouchTargets ? Alignment.center : null,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                // `.user-reacted` follows `:hover` at equal specificity, so its fill wins while hovered.
+                color: r.userReacted
+                    ? c.primaryA(0.12)
+                    : (_hover
+                        ? c.primaryA(0.08)
+                        : Colors.white.withValues(alpha: 0.05)),
+                borderRadius: const BorderRadius.all(Radius.circular(20)),
+                border: Border.all(
+                  color: r.userReacted
+                      ? c.primaryA(0.35)
+                      : (_hover ? c.primaryA(0.3) : c.glassBorder),
+                ),
+                boxShadow: r.userReacted
+                    ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 10)]
+                    : null,
+              ),
+              // Only an exact `:shortcode:` renders as an image (count 3px apart); plain text is one "emoji count" run.
+              child: _rxWholeToken.hasMatch(r.emoji)
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        InlineEmojiText(
+                          text: r.emoji,
+                          style: TextStyle(color: c.text, fontSize: 12),
+                          wholeStringOnly: true,
+                          emojiSize: 12 * 1.45,
+                          emojiMargin: EdgeInsets.zero,
+                          emojiAlignment: PlaceholderAlignment.middle,
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          abbreviateNumber(r.count),
+                          style: TextStyle(color: c.text, fontSize: 12),
+                        ),
+                      ],
+                    )
+                  : Text(
+                      '${r.emoji} ${abbreviateNumber(r.count)}',
+                      style: TextStyle(color: c.text, fontSize: 12),
+                    ),
+            ),
+        ),
+      ),
+    );
+    final tip = reactionTipLabel(r.emoji);
+    return HoverOpenRegion(
+      key: _hoverKey,
+      open: (inside) => widget.onHoverOpen(_rect(context), inside),
+      child: tip.isEmpty
+          ? badge
+          : NymTooltip(
+              message: tip,
+              excludeFromSemantics: true,
+              triggerMode: TooltipTriggerMode.manual,
+              child: badge,
+            ),
+    );
+  }
+}
+
+final Map<String, List<String>> _emojiNames = buildEmojiToNames();
+
+String reactionTipLabel(String emoji) {
+  if (RegExp(r'^:[a-zA-Z0-9_]+:$').hasMatch(emoji)) return emoji;
+  final names = _emojiNames[emoji];
+  return names == null || names.isEmpty ? '' : names.first;
+}
+
+/// Add-reaction pill opening the full picker; touch surfaces the CSS hover as a press state.
+class _AddReactionButton extends StatefulWidget {
+  const _AddReactionButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  State<_AddReactionButton> createState() => _AddReactionButtonState();
+}
+
+class _AddReactionButtonState extends State<_AddReactionButton> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Semantics(
+      button: true,
+      label: tr('Add reaction'),
+      onTap: widget.onTap,
+      excludeSemantics: true,
+      child: GestureDetector(
+      onTap: widget.onTap,
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      child: EasedScale(
+        duration: const Duration(milliseconds: 120),
+        scale: _pressed ? 0.95 : 1.0,
+        // The 0.6 rest opacity is folded into each color's alpha, avoiding a per-frame saveLayer on every row.
+        child: Container(
+          constraints: context.largeTouchTargets
+              ? const BoxConstraints(minHeight: 32)
+              : null,
+          alignment: context.largeTouchTargets ? Alignment.center : null,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: _pressed
+                ? c.primaryA(0.08)
+                : Colors.white.withValues(alpha: 0.04 * 0.6),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+            border: Border.all(
+              color: _pressed
+                  ? c.primaryA(0.3)
+                  : c.glassBorder
+                      .withValues(alpha: c.glassBorder.a * 0.6),
+            ),
+          ),
+          child: NymSvgIcon(
+            NymIcons.addReaction,
+            size: 16,
+            color: _pressed ? c.text : c.text.withValues(alpha: c.text.a * 0.6),
+          ),
+        ),
+      ),
+      ),
+    );
+  }
+}
+
+/// Inline action button for a system pill.
+class _SystemActionButton extends StatefulWidget {
+  const _SystemActionButton({required this.label, required this.onTap});
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  State<_SystemActionButton> createState() => _SystemActionButtonState();
+}
+
+class _SystemActionButtonState extends State<_SystemActionButton> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return GestureDetector(
+      onTap: widget.onTap,
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      child: EasedScale(
+        duration: const Duration(milliseconds: 120),
+        scale: _pressed ? 0.97 : 1.0,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: _pressed ? c.primaryA(0.16) : c.primaryA(0.10),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+            border: Border.all(color: c.primaryA(_pressed ? 0.5 : 0.3)),
+          ),
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              color: c.primary,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shows the real message for 10 seconds, then a translucent redacted bar.
+class _RedactedReveal extends StatefulWidget {
+  const _RedactedReveal({required this.child, required this.fontSize});
+  final Widget child;
+  final double fontSize;
+
+  @override
+  State<_RedactedReveal> createState() => _RedactedRevealState();
+}
+
+class _RedactedRevealState extends State<_RedactedReveal> {
+  Timer? _timer;
+  bool _blanked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(const Duration(seconds: 10), () {
+      if (mounted) setState(() => _blanked = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_blanked) return widget.child;
+    final isLight = context.nym.isLight;
+    return Container(
+      constraints: BoxConstraints(
+        minWidth: 120,
+        minHeight: widget.fontSize * 1.2,
+      ),
+      decoration: BoxDecoration(
+        color: isLight
+            ? const Color(0x1F000000)
+            : Colors.white.withValues(alpha: 0.15),
+        borderRadius: NymRadius.rxs,
+      ),
+    );
+  }
+}
+
+/// Collapsible "Reasoning" block a bot reply prepends inside its content.
+class _BotThinkSection extends StatefulWidget {
+  const _BotThinkSection({
+    required this.reasoning,
+    required this.fontSize,
+  });
+
+  final String reasoning;
+
+  final double fontSize;
+
+  @override
+  State<_BotThinkSection> createState() => _BotThinkSectionState();
+}
+
+class _BotThinkSectionState extends State<_BotThinkSection> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final fs = widget.fontSize;
+    final side = BorderSide(color: c.glassBorder);
+    return Container(
+      margin: const EdgeInsets.only(top: 2, bottom: 8),
+      padding: const EdgeInsets.only(left: 3),
+      decoration: BoxDecoration(
+        color: c.secondaryA(0.08),
+        borderRadius: NymRadius.rxs,
+        border: Border(top: side, right: side, bottom: side),
+      ),
+      foregroundDecoration: BoxDecoration(
+        borderRadius: NymRadius.rxs,
+        border: Border(left: BorderSide(color: c.primaryA(0.45), width: 3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Container(
+              decoration: _expanded
+                  ? BoxDecoration(border: Border(bottom: side))
+                  : null,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AnimatedRotation(
+                    duration: const Duration(milliseconds: 250),
+                    curve: Curves.fastOutSlowIn,
+                    turns: _expanded ? 0.25 : 0,
+                    child: NymSvgIcon(NymIcons.revealArrowRight,
+                        size: fs, color: c.textDim),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(tr('💭 Reasoning'),
+                      style: TextStyle(
+                          color: c.textDim,
+                          fontSize: fs,
+                          fontWeight: FontWeight.w400)),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                child: Text(
+                  widget.reasoning,
+                  style: TextStyle(
+                      color: c.textDim,
+                      fontSize: fs,
+                      height: 1.5,
+                      fontStyle: FontStyle.italic),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Non-interactive highlight pulse over 1.8s, played each time [active] rises after a quote jump.
+class _RowFlash extends SingleChildRenderObjectWidget {
+  const _RowFlash({required this.opacity, required super.child});
+
+  final Animation<double>? opacity;
+
+  @override
+  _RenderRowFlash createRenderObject(BuildContext context) =>
+      _RenderRowFlash(opacity, context.nym);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderRowFlash renderObject) {
+    renderObject
+      ..opacity = opacity
+      ..colors = context.nym;
+  }
+}
+
+class _RenderRowFlash extends RenderProxyBox {
+  _RenderRowFlash(this._opacity, this._colors);
+
+  Animation<double>? _opacity;
+  set opacity(Animation<double>? value) {
+    if (identical(value, _opacity)) return;
+    if (attached) _opacity?.removeListener(markNeedsPaint);
+    _opacity = value;
+    if (attached) _opacity?.addListener(markNeedsPaint);
+    markNeedsPaint();
+  }
+
+  NymColors _colors;
+  set colors(NymColors value) {
+    if (identical(value, _colors)) return;
+    _colors = value;
+    _painter = null;
+    markNeedsPaint();
+  }
+
+  BoxPainter? _painter;
+
+  @override
+  void attach(PipelineOwner owner) {
+    super.attach(owner);
+    _opacity?.addListener(markNeedsPaint);
+  }
+
+  @override
+  void detach() {
+    _opacity?.removeListener(markNeedsPaint);
+    super.detach();
+  }
+
+  @override
+  void dispose() {
+    _painter?.dispose();
+    super.dispose();
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    super.paint(context, offset);
+    final a = _opacity;
+    if (a == null || a.isCompleted || a.isDismissed) return;
+    final v = a.value;
+    if (v <= 0) return;
+    final painter = _painter ??= BoxDecoration(
+      color: _colors.primaryA(0.18),
+      border: Border.all(color: _colors.primaryA(0.5)),
+      borderRadius: NymRadius.rsm,
+    ).createBoxPainter();
+    final canvas = context.canvas;
+    canvas.saveLayer(offset & size,
+        Paint()..color = Color.fromRGBO(0, 0, 0, v.clamp(0.0, 1.0)));
+    painter.paint(canvas, offset, ImageConfiguration(size: size));
+    canvas.restore();
+  }
+}
+
+class _RowFocusTracker {
+  static FocusManager? _hooked;
+  static _MessageRowState? _row;
+
+  static void ensure() {
+    final fm = FocusManager.instance;
+    if (identical(_hooked, fm)) return;
+    _hooked?.removeListener(_changed);
+    _hooked = fm..addListener(_changed);
+  }
+
+  static void _changed() {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    final next = ctx != null && ctx.mounted
+        ? ctx.findAncestorStateOfType<_MessageRowState>()
+        : null;
+    final prev = _row;
+    if (identical(prev, next)) return;
+    _row = next;
+    if (prev != null && prev.mounted) prev._onRowFocus(false);
+    if (next != null) next._onRowFocus(true);
+  }
+
+  static void forget(_MessageRowState row) {
+    if (identical(_row, row)) _row = null;
+  }
+}
+
+Color hoverBarFill(NymColors c) =>
+    Color.alphaBlend(c.bgSecondary, c.bg.withValues(alpha: 1));
+
+Color hoverBarLitFill(NymColors c) =>
+    Color.alphaBlend(c.text.withValues(alpha: 0.08), hoverBarFill(c));
+
+bool hoverBarLit(Set<WidgetState> s) =>
+    s.contains(WidgetState.hovered) ||
+    s.contains(WidgetState.pressed) ||
+    (s.contains(WidgetState.focused) && HoverBarFocus.instance.visible);
+
+final class HoverBarFocus extends ChangeNotifier {
+  HoverBarFocus._();
+
+  static final HoverBarFocus instance = HoverBarFocus._();
+
+  FocusManager? _manager;
+  bool _hooked = false;
+  bool _mouse = false;
+
+  bool get visible =>
+      !_mouse &&
+      FocusManager.instance.highlightMode == FocusHighlightMode.traditional;
+
+  @override
+  void addListener(VoidCallback listener) {
+    super.addListener(listener);
+    _hook();
+  }
+
+  @override
+  void removeListener(VoidCallback listener) {
+    super.removeListener(listener);
+    if (!hasListeners) _unhook();
+  }
+
+  void _hook() {
+    if (_hooked) return;
+    _hooked = true;
+    final fm = FocusManager.instance;
+    if (!identical(fm, _manager)) {
+      _manager = fm;
+      _mouse = false;
+    }
+    fm.addHighlightModeListener(_onMode);
+    HardwareKeyboard.instance.addHandler(_onKey);
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_onPointer);
+  }
+
+  void _unhook() {
+    if (!_hooked) return;
+    _hooked = false;
+    _manager?.removeHighlightModeListener(_onMode);
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_onPointer);
+  }
+
+  void _onMode(FocusHighlightMode _) => notifyListeners();
+
+  bool _onKey(KeyEvent e) {
+    if (e is KeyDownEvent && _mouse) {
+      _mouse = false;
+      notifyListeners();
+    }
+    return false;
+  }
+
+  void _onPointer(PointerEvent e) {
+    if (e is PointerDownEvent && e.kind == PointerDeviceKind.mouse && !_mouse) {
+      _mouse = true;
+      notifyListeners();
+    }
+  }
+}
+
+class _MsgHoverButtons extends StatelessWidget {
+  const _MsgHoverButtons({
+    required this.buttons,
+    required this.onAction,
+    required this.onMore,
+    this.onFocusChange,
+  });
+
+  final List<String> buttons;
+  final ValueChanged<bool>? onFocusChange;
+  final ValueChanged<String> onAction;
+  final ValueChanged<Rect> onMore;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget button(String id) {
+      if (id != 'more') {
+        return _HoverActionButton(
+          svg: hoverActionSvg(id),
+          onTap: () => onAction(id),
+          tooltip: hoverActionLabel(id),
+          onFocusChange: onFocusChange,
+        );
+      }
+      return Builder(
+        builder: (ctx) => _HoverActionButton(
+          svg: hoverActionSvg(id),
+          tooltip: hoverActionLabel(id),
+          onFocusChange: onFocusChange,
+          onTap: () {
+            final box = ctx.findRenderObject();
+            if (box is! RenderBox || !box.hasSize) return;
+            onMore(box.localToGlobal(Offset.zero) & box.size);
+          },
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < buttons.length; i++) ...[
+          if (i > 0) const SizedBox(width: kHoverBarGap),
+          button(buttons[i]),
+        ],
+      ],
+    );
+  }
+}
+
+class _HoverActionButton extends StatefulWidget {
+  const _HoverActionButton({
+    required this.svg,
+    required this.onTap,
+    this.tooltip,
+    this.onFocusChange,
+  });
+  final String svg;
+  final VoidCallback? onTap;
+  final String? tooltip;
+  final ValueChanged<bool>? onFocusChange;
+
+  @override
+  State<_HoverActionButton> createState() => _HoverActionButtonState();
+}
+
+class _HoverActionButtonState extends State<_HoverActionButton> {
+  bool _hover = false;
+  bool _focus = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final restFill = hoverBarFill(c);
+    final lit = _hover || _focus;
+    final restBorder =
+        c.isLight ? Colors.black.withValues(alpha: 0.08) : c.glassBorder;
+    final btn = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: lit
+                ? Color.alphaBlend(c.text.withValues(alpha: 0.08), restFill)
+                : restFill,
+            borderRadius: NymRadius.rxs,
+            border: Border.all(color: lit ? c.primaryA(0.3) : restBorder),
+          ),
+          child: NymSvgIcon(widget.svg, size: 16, color: c.text),
+        ),
+      ),
+    );
+    return NymFocusable(
+      onActivate: widget.onTap,
+      tooltip: widget.tooltip,
+      excludeChildSemantics: true,
+      onFocusChange: (v) {
+        if (v != _focus) setState(() => _focus = v);
+        widget.onFocusChange?.call(v);
+      },
+      child: btn,
+    );
+  }
+}
+
+/// Copies an event reference and confirms in place for a moment.
+class _CopyRefButton extends StatefulWidget {
+  const _CopyRefButton({required this.label, required this.value});
+  final String label;
+  final String value;
+
+  @override
+  State<_CopyRefButton> createState() => _CopyRefButtonState();
+}
+
+class _CopyRefButtonState extends State<_CopyRefButton> {
+  bool _copied = false;
+  Timer? _reset;
+
+  @override
+  void dispose() {
+    _reset?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: widget.value));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    _reset?.cancel();
+    _reset = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return InkWell(
+      onTap: _copy,
+      borderRadius: NymRadius.rsm,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.06),
+          border: Border.all(color: c.glassBorder),
+          borderRadius: NymRadius.rsm,
+        ),
+        child: Text(
+          _copied ? tr('Copied') : widget.label,
+          softWrap: false,
+          style: TextStyle(
+              color: _copied ? c.primary : c.text, fontSize: 11),
+        ),
+      ),
+    );
+  }
+}
+
+/// Full width below the copy buttons, as in the PWA.
+class _DetailsButton extends StatelessWidget {
+  const _DetailsButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: NymRadius.rsm,
+      child: Container(
+        width: double.infinity,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.06),
+          border: Border.all(color: c.glassBorder),
+          borderRadius: NymRadius.rsm,
+        ),
+        child: Text(
+          tr('Show all event details'),
+          softWrap: false,
+          style: TextStyle(color: c.text, fontSize: 11),
+        ),
+      ),
+    );
+  }
+}
+
+/// Tappable timestamp: hover tints and shows a tooltip; tap opens the anchored timestamp popup.
+class _TimestampText extends StatefulWidget {
+  const _TimestampText({
+    required this.label,
+    required this.fullTimestamp,
+    required this.fontSize,
+    this.height,
+    this.powEventId,
+    this.powTarget,
+    this.powApplies = false,
+    this.copyPubkey = '',
+    this.detailNym,
+    this.detailChannel,
+    this.detailCreatedAt,
+  });
+
+  final String label;
+  final String fullTimestamp;
+  final double fontSize;
+  final double? height;
+
+  /// Included so the copied `nevent` carries the author.
+  final String copyPubkey;
+
+  final String? powEventId;
+
+  /// NIP-13 target from the `nonce` tag; null means no tag.
+  final int? powTarget;
+
+  /// PMs and group messages are gift-wrapped and never mined, so PoW is omitted rather than shown as "none".
+  final bool powApplies;
+
+  /// Fallback data for the details panel when no signed event is held.
+  final String? detailNym;
+  final String? detailChannel;
+  final DateTime? detailCreatedAt;
+
+  @override
+  State<_TimestampText> createState() => _TimestampTextState();
+}
+
+class _TimestampTextState extends State<_TimestampText> {
+  bool _hover = false;
+  bool _tip = RendererBinding.instance.mouseTracker.mouseIsConnected;
+  OverlayEntry? _popup;
+
+  /// App sends are always mined (16-bit floor), so no nonce tag means no work; chance zeros don't count.
+  List<Widget> _powRows(NymColors c) {
+    if (!widget.powApplies) return const [];
+    final target = widget.powTarget;
+    final label = Text(
+      tr('Proof-of-work'),
+      softWrap: false,
+      style: TextStyle(color: c.textDim, fontSize: 12),
+    );
+
+    late final Widget value;
+    if (target == null) {
+      value = Text(
+        tr('None'),
+        softWrap: false,
+        style: TextStyle(color: c.primary, fontSize: 12),
+      );
+    } else {
+      final bits = powBitsForId(widget.powEventId);
+      final short = target > 0 && bits < target;
+      final text = target > 0
+          ? (short
+              ? tr('{bits} bits · target {target} (below target)',
+                  {'bits': bits, 'target': target})
+              : tr('{bits} bits · target {target}',
+                  {'bits': bits, 'target': target}))
+          : tr('{bits} bits', {'bits': bits});
+      value = Text(
+        text,
+        softWrap: false,
+        style: TextStyle(
+          // A message short of its own target is shown as such, not rounded up.
+          color: short ? c.textDim : c.primary,
+          fontSize: 12,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+      );
+    }
+
+    return [
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Divider(height: 1, thickness: 1, color: c.glassBorder),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [label, const SizedBox(width: 8), value],
+        ),
+      ),
+    ];
+  }
+
+  /// Nothing for rows without a real event id (optimistic echo, system line, poll).
+  List<Widget> _copyRows(NymColors c) {
+    final id = widget.powEventId ?? '';
+    if (!RegExp(r'^[0-9a-f]{64}$', caseSensitive: false).hasMatch(id)) {
+      return const [];
+    }
+    final nevent = encodeNevent(id,
+        author: widget.copyPubkey,
+        relays: RelayConfig.defaultRelays.take(3).toList());
+    return [
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Divider(height: 1, thickness: 1, color: c.glassBorder),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (nevent.isNotEmpty) ...[
+              _CopyRefButton(label: tr('Copy nevent'), value: nevent),
+              const SizedBox(width: 6),
+            ],
+            _CopyRefButton(label: tr('Copy event ID'), value: id),
+          ],
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: _DetailsButton(
+          onTap: () {
+            _closePopup();
+            showEventDetails(
+              context,
+              eventId: id,
+              pubkey: widget.copyPubkey,
+              nym: widget.detailNym,
+              channel: widget.detailChannel,
+              createdAt: widget.detailCreatedAt,
+              powTarget: widget.powTarget,
+            );
+          },
+        ),
+      ),
+    ];
+  }
+
+  @override
+  void dispose() {
+    _popup?.remove();
+    _popup = null;
+    super.dispose();
+  }
+
+  void _closePopup() {
+    _popup?.remove();
+    _popup = null;
+  }
+
+  /// Right-aligned to the timestamp, 6px above when there is room, else below; the barrier closes it.
+  void _openPopup() {
+    _closePopup();
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final rect = box.localToGlobal(Offset.zero) & box.size;
+    final overlay = Overlay.of(context);
+    final entry = OverlayEntry(
+      builder: (ctx) {
+        final c = ctx.nym;
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closePopup,
+                onPanStart: (_) => _closePopup(),
+              ),
+            ),
+            AnchoredPopup(
+              anchor: rect,
+              align: PopupAlign.end,
+              child: Material(
+                type: MaterialType.transparency,
+                child: Container(
+                  constraints:
+                      const BoxConstraints(minWidth: 160, maxWidth: 280),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: c.bgSecondary,
+                    borderRadius: NymRadius.rmd,
+                    border: Border.all(
+                      color: c.isLight
+                          ? Colors.black.withValues(alpha: 0.08)
+                          : c.glassBorder,
+                    ),
+                    boxShadow: c.isLight
+                        ? const [
+                            BoxShadow(
+                                color: Color(0x1F000000),
+                                offset: Offset(0, 8),
+                                blurRadius: 32),
+                          ]
+                        : [
+                            const BoxShadow(
+                                color: Color(0x80000000),
+                                offset: Offset(0, 8),
+                                blurRadius: 32),
+                            BoxShadow(color: c.primaryA(0.1), blurRadius: 20),
+                            const BoxShadow(
+                                color: Color(0x0DFFFFFF), spreadRadius: 1),
+                          ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.fullTimestamp,
+                        softWrap: false,
+                        style: TextStyle(color: c.text, fontSize: 13),
+                      ),
+                      ..._powRows(c),
+                      ..._copyRows(c),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    _popup = entry;
+    overlay.insert(entry);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = _tip = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: RowTap(
+        behavior: HitTestBehavior.opaque,
+        onTap: _openPopup,
+        child: _tipped(
+          message: widget.fullTimestamp,
+          // Hover-only: tap opens the popup and long-press belongs to quick-react.
+          triggerMode: TooltipTriggerMode.manual,
+          waitDuration: Duration.zero,
+          preferBelow: false,
+          verticalOffset: 14,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: c.isLight
+                ? const Color(0xEBFFFFFF)
+                : const Color(0xE6141423),
+            borderRadius: NymRadius.rxs,
+            border: Border.all(
+              color: c.isLight
+                  ? Colors.black.withValues(alpha: 0.08)
+                  : c.glassBorder,
+            ),
+            boxShadow: const [
+              BoxShadow(
+                  color: Color(0x4D000000),
+                  offset: Offset(0, 2),
+                  blurRadius: 8),
+            ],
+          ),
+          textStyle:
+              TextStyle(fontSize: 11, color: c.isLight ? c.text : c.textDim),
+          child: AnimatedDefaultTextStyle(
+            duration: const Duration(milliseconds: 120),
+            curve: Curves.ease,
+            style: TextStyle(
+              color: _hover ? c.primary : c.textDim,
+              fontSize: widget.fontSize,
+              height: widget.height,
+            ),
+            child: Text(widget.label),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _tipped({
+    required String message,
+    required TooltipTriggerMode triggerMode,
+    required Duration waitDuration,
+    required bool preferBelow,
+    required double verticalOffset,
+    required EdgeInsetsGeometry padding,
+    required Decoration decoration,
+    required TextStyle textStyle,
+    required Widget child,
+  }) {
+    if (!_tip) return Semantics(tooltip: message, child: child);
+    return NymTooltip(
+      message: message,
+      triggerMode: triggerMode,
+      waitDuration: waitDuration,
+      preferBelow: preferBelow,
+      verticalOffset: verticalOffset,
+      padding: padding,
+      decoration: decoration,
+      textStyle: textStyle,
+      child: child,
+    );
+  }
+}
+
+/// P2P file-offer card; stateful because a card seen seeded keeps its button and flips it to "Unavailable".
+class FileOfferCard extends StatefulWidget {
+  const FileOfferCard({
+    super.key,
+    required this.offer,
+    required this.isOwn,
+    required this.service,
+    this.seedGeohash,
+    this.seedChannelName,
+  });
+
+  final FileOffer offer;
+  final bool isOwn;
+  final P2PService service;
+
+  /// Open channel's wire key so Stop broadcasts with `g` or `d`; both null for PM/group.
+  final String? seedGeohash;
+  final String? seedChannelName;
+
+  @override
+  State<FileOfferCard> createState() => _FileOfferCardState();
+}
+
+class _FileOfferCardState extends State<FileOfferCard> {
+  FileOffer get offer => widget.offer;
+  bool get isOwn => widget.isOwn;
+  P2PService get service => widget.service;
+
+  /// True once rendered seeded, so a later unseeded flip keeps the button.
+  bool _sawSeeded = false;
+
+  /// The PWA uses one file glyph and only re-tints the stroke per category.
+  static Color _category(NymColors c, FileOffer o) {
+    final ext =
+        o.name.contains('.') ? o.name.split('.').last.toLowerCase() : '';
+    final mime = o.type.toLowerCase();
+    bool any(List<String> exts) => exts.contains(ext);
+    if (any(['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma']) ||
+        mime.startsWith('audio/')) {
+      return c.purple;
+    }
+    if (any(['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm']) ||
+        mime.startsWith('video/')) {
+      return c.danger;
+    }
+    if (any(['zip', 'rar', '7z', 'tar', 'gz', 'bz2'])) {
+      return c.warning;
+    }
+    if (any(
+        ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'rtf'])) {
+      return c.secondary;
+    }
+    return c
+        .primary;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return ListenableBuilder(
+      listenable: service,
+      builder: (context, _) {
+        final iconColor = _category(c, offer);
+        final isTorrent = offer.isTorrent;
+        final unseeded = service.isUnseeded(offer.offerId);
+        P2PTransfer? transfer;
+        for (final t in service.transfers) {
+          if (t.offerId == offer.offerId) transfer = t;
+        }
+        // Read in the same build, so no setState needed.
+        if (!unseeded) _sawSeeded = true;
+
+        return Container(
+          constraints: const BoxConstraints(maxWidth: 350),
+          margin: const EdgeInsets.symmetric(vertical: 8),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.04),
+            borderRadius: const BorderRadius.all(Radius.circular(16)),
+            border: Border.all(
+              color: isTorrent ? c.secondaryA(0.3) : c.glassBorder,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.05),
+                      border: Border.all(color: c.glassBorder),
+                      borderRadius: NymRadius.rxs,
+                    ),
+                    child: NymSvgIcon(NymIcons.fileOffer,
+                        color: iconColor, size: 24),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          offer.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: c.primary,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Text(
+                          '${formatFileSize(offer.size)} • '
+                          '${offer.type.isEmpty ? tr('Unknown type') : offer.type}'
+                          '${isTorrent ? ' • Torrent' : ''}',
+                          style: TextStyle(color: c.textDim, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              _status(context, c, unseeded: unseeded, transfer: transfer),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _status(
+    BuildContext context,
+    NymColors c, {
+    required bool unseeded,
+    required P2PTransfer? transfer,
+  }) {
+    if (isOwn) {
+      if (unseeded) {
+        return _dotRow(c, tr('No longer seeding'));
+      }
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          children: [
+            _SeedingDot(color: c.primary),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(tr('Seeding - available for download'),
+                  style: TextStyle(color: c.primary, fontSize: 11)),
+            ),
+            _StopBtn(
+                onTap: () => service.stopSeeding(offer.offerId,
+                    geohash: widget.seedGeohash,
+                    channelName: widget.seedChannelName)),
+          ],
+        ),
+      );
+    }
+    // A peer offer first rendered unseeded shows the bare dot row.
+    if (unseeded && !_sawSeeded) {
+      return _dotRow(c, tr('No longer available'));
+    }
+
+    // The peer button stays through the lifecycle: Download, Connecting..., Downloaded, Retry, or Unavailable.
+    final active = transfer != null &&
+        (transfer.status == P2PStatus.connecting ||
+            transfer.status == P2PStatus.transferring);
+    final base = offer.isTorrent ? c.secondary : c.primary;
+    final Widget button;
+    if (unseeded) {
+      button = _OfferBtn(
+        label: tr('Unavailable'),
+        textColor: c.textDim,
+        borderColor: c.textDim,
+        fillColor: base.withValues(alpha: 0.08),
+        opacity: 0.4,
+        onTap: null,
+      );
+    } else if (active) {
+      button = _OfferBtn(
+        label: tr('Connecting...'),
+        textColor: c.secondary,
+        borderColor: c.secondary,
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: null,
+      );
+    } else if (transfer != null && transfer.status == P2PStatus.complete) {
+      button = _OfferBtn(
+        label: tr('Downloaded'),
+        textColor: base,
+        borderColor: base.withValues(alpha: 0.25),
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: null,
+      );
+    } else if (transfer != null && transfer.status == P2PStatus.error) {
+      button = _OfferBtn(
+        label: tr('Retry'),
+        textColor: base,
+        borderColor: base.withValues(alpha: 0.25),
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: () => service.requestFile(offer.offerId),
+      );
+    } else {
+      button = _OfferBtn(
+        label: offer.isTorrent ? tr('Download (Torrent)') : tr('Download'),
+        textColor: base,
+        borderColor: base.withValues(alpha: 0.25),
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: () => service.requestFile(offer.offerId),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(padding: const EdgeInsets.only(top: 10), child: button),
+        // Revealed on request and never re-hidden.
+        if (transfer != null) ...[
+          const SizedBox(height: 10),
+          // LinearProgressIndicator can't paint a gradient, so use a Stack.
+          ClipRRect(
+            borderRadius: const BorderRadius.all(Radius.circular(10)),
+            child: SizedBox(
+              height: 5,
+              child: Stack(
+                children: [
+                  Container(color: Colors.white.withValues(alpha: 0.05)),
+                  FractionallySizedBox(
+                    widthFactor: (transfer.progress / 100).clamp(0.0, 1.0),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius:
+                            const BorderRadius.all(Radius.circular(10)),
+                        gradient: LinearGradient(
+                          colors: [c.secondary, c.primary],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // Mid-transfer shows `<pct>% • <speed>/s`; otherwise the last status.
+          const SizedBox(height: 4),
+          Text(
+            _progressText(transfer),
+            textAlign: TextAlign.center,
+            style: TextStyle(color: c.textDim, fontSize: 11),
+          ),
+        ],
+      ],
+    );
+  }
+
+  String _progressText(P2PTransfer transfer) {
+    if (transfer.status == P2PStatus.transferring) {
+      final elapsed =
+          (DateTime.now().millisecondsSinceEpoch - transfer.startTime) / 1000;
+      final speed =
+          elapsed > 0 ? (transfer.bytesReceived / elapsed).round() : 0;
+      return '${transfer.progress.toStringAsFixed(1)}% • '
+          '${formatFileSize(speed)}/s';
+    }
+    return transfer.message ?? tr('Connecting...');
+  }
+
+  Widget _dotRow(NymColors c, String label) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Opacity(
+        opacity: 0.7,
+        child: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: c.danger.withValues(alpha: 0.6),
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SeedingDot extends StatefulWidget {
+  const _SeedingDot({required this.color});
+  final Color color;
+
+  @override
+  State<_SeedingDot> createState() => _SeedingDotState();
+}
+
+class _SeedingDotState extends State<_SeedingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1500),
+  )..repeat();
+
+  late final Animation<double> _opacity = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: 1.0, end: 0.5).chain(CurveTween(curve: Curves.ease)),
+      weight: 50,
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: 0.5, end: 1.0).chain(CurveTween(curve: Curves.ease)),
+      weight: 50,
+    ),
+  ]).animate(_ctrl);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(
+          color: widget.color,
+          shape: BoxShape.circle,
+        ),
+      ),
+    );
+  }
+}
+
+/// A null [onTap] renders an inert state.
+class _OfferBtn extends StatelessWidget {
+  const _OfferBtn({
+    required this.label,
+    required this.textColor,
+    required this.borderColor,
+    required this.fillColor,
+    this.opacity = 1,
+    this.onTap,
+  });
+  final String label;
+  final Color textColor;
+  final Color borderColor;
+  final Color fillColor;
+
+  final double opacity;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Opacity(
+        opacity: opacity,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+          decoration: BoxDecoration(
+            color: fillColor,
+            border: Border.all(color: borderColor),
+            borderRadius: const BorderRadius.all(Radius.circular(8)),
+          ),
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: textColor,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StopBtn extends StatelessWidget {
+  const _StopBtn({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 8),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.05),
+          border: Border.all(color: c.danger),
+          borderRadius: const BorderRadius.all(Radius.circular(8)),
+        ),
+        child:
+            Text(tr('Stop'), style: TextStyle(color: c.danger, fontSize: 10)),
+      ),
+    );
+  }
+}
+
+String? localAccountAvatar(WidgetRef ref, Message m) {
+  if (m.isOwn) return null;
+  final index = ref.read(accountsProvider)?.changes.value;
+  if (index == null) return null;
+  for (final a in index.accounts) {
+    if (a.pubkey == m.pubkey) return a.avatar.isEmpty ? null : a.avatar;
+  }
+  return null;
+}
+
+/// Folds oldest-first messages into same-author bubble runs; shared by the single-chat and columns views.
+List<List<MessageGroupEntry>> buildMessageGroups(
+  List<Message> messages, {
+  required Map<String, List<MessageReaction>> reactions,
+  required bool useBubbles,
+  String mentionToken = '',
+  String? breakBefore,
+}) {
+  // Same predicate as messages_list `_groupsWith`.
+  bool groupsWith(Message prev, Message cur) =>
+      !prev.localOnlyRow &&
+      !cur.localOnlyRow &&
+      !prev.isSystemRow &&
+      !cur.isSystemRow &&
+      !prev.isMeAction &&
+      !cur.isMeAction &&
+      prev.pubkey == cur.pubkey &&
+      (cur.createdAt - prev.createdAt).abs() <= 300;
+  final groups = <List<MessageGroupEntry>>[];
+  for (final m in messages) {
+    final entry = MessageGroupEntry(
+      message: m,
+      reactions: reactions[m.id] ?? const [],
+      // Mention flags never apply to self or PM/group rows, nor while the self nym is unknown.
+      mentioned: mentionToken.length > 1 &&
+          !m.isOwn &&
+          !m.isPM &&
+          m.content.contains(mentionToken),
+    );
+    if (useBubbles &&
+        groups.isNotEmpty &&
+        groups.last.length < 24 &&
+        m.id != breakBefore &&
+        groupsWith(groups.last.last.message, m)) {
+      groups.last.add(entry);
+    } else {
+      groups.add([entry]);
+    }
+  }
+  return groups;
+}
+
+/// Reactions and mention flag are resolved once by the list.
+class MessageGroupEntry {
+  const MessageGroupEntry({
+    required this.message,
+    required this.reactions,
+    required this.mentioned,
+  });
+
+  final Message message;
+  final List<MessageReaction> reactions;
+  final bool mentioned;
+}
+
+/// Same-author bubble run beside one gliding avatar; IRC and system/`/me` rows render bare.
+class MessageGroup extends ConsumerStatefulWidget {
+  const MessageGroup({
+    super.key,
+    required this.entries,
+    required this.settings,
+    this.columnsMode = false,
+    this.onReactionPicker,
+    this.scrollKey,
+    this.trailingFor,
+  });
+
+  final Widget? Function(Message m)? trailingFor;
+
+  final List<MessageGroupEntry> entries;
+  final Settings settings;
+
+  /// Forwarded so a quote tap jumps this list; null in the single-chat view.
+  final String? scrollKey;
+
+  /// Columns-deck variant; on desktop the self group drops its 14px right padding.
+  final bool columnsMode;
+  final ValueChanged<Message>? onReactionPicker;
+
+  @override
+  ConsumerState<MessageGroup> createState() => _MessageGroupState();
+}
+
+class _MessageGroupState extends ConsumerState<MessageGroup> {
+  /// Kept stable so the keyed bubble subtree isn't torn down each frame.
+  final GlobalKey _bubbleKey = GlobalKey();
+
+  /// Live swipe offset of the last bubble, so the group avatar slides with it.
+  final ValueNotifier<double> _avatarDx = ValueNotifier<double>(0);
+
+  @override
+  void dispose() {
+    _avatarDx.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = widget.entries;
+    final settings = widget.settings;
+    final onReactionPicker = widget.onReactionPicker;
+    final useBubbles = settings.useBubbles;
+    final first = entries.first.message;
+    final self = first.isOwn;
+
+    // Only the lead carries a name; `inGroup` strips rows so the group hosts one avatar.
+    List<Widget> buildRows() => [
+          for (var i = 0; i < entries.length; i++) ...[
+            MessageRow(
+              key: ValueKey(entries[i].message.id),
+              message: entries[i].message,
+              settings: settings,
+              reactions: entries[i].reactions,
+              mentioned: entries[i].mentioned,
+              columnsMode: widget.columnsMode,
+              scrollKey: widget.scrollKey,
+              grouped: useBubbles && i > 0,
+              showName: !(useBubbles && i > 0),
+              showAvatar: false,
+              inGroup: useBubbles,
+              onReactionPicker: onReactionPicker,
+              bubbleAnchorKey: i == entries.length - 1 ? _bubbleKey : null,
+              swipeAvatarDx: useBubbles && !self && i == entries.length - 1
+                  ? _avatarDx
+                  : null,
+            ),
+            ?widget.trailingFor?.call(entries[i].message),
+          ],
+        ];
+
+    if (!useBubbles || first.isSystemRow || first.isMeAction) {
+      final rows = buildRows();
+      return rows.length == 1
+          ? rows.first
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch, children: rows);
+    }
+
+    // Force full width; a stretch column would otherwise shrink-wrap and break full-width rows and right alignment.
+    final stack = SizedBox(
+      width: double.infinity,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: buildRows(),
+      ),
+    );
+
+    // Desktop columns mode drops the right padding for self groups.
+    if (self) {
+      final flushRight = widget.columnsMode &&
+          MediaQuery.of(context).size.width > NymDimens.mobileBreakpoint;
+      return Padding(
+        padding: EdgeInsets.only(left: 14, right: flushRight ? 0 : 14),
+        child: stack,
+      );
+    }
+
+    // The avatar is a Positioned overlay in the left gutter so it can glide without affecting the bubble column.
+    final last = entries.last.message;
+    final picture = first.localOnlyRow
+        ? localAccountAvatar(ref, first)
+        : ref.watch(
+            usersProvider.select((m) => m[first.pubkey]?.profile?.picture));
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 0, 14, 0),
+      child: Stack(
+        // Swipes are clipped only at the scroller, so the indicator chip may paint over group padding.
+        clipBehavior: Clip.none,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 38),
+            child: stack,
+          ),
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: 32,
+            child: ValueListenableBuilder<double>(
+              valueListenable: _avatarDx,
+              builder: (context, dx, child) => Transform.translate(
+                offset: Offset(dx, 0),
+                child: child,
+              ),
+              child: _StickyGroupAvatar(
+                pubkey: first.pubkey,
+                imageUrl: picture,
+                localOnly: first.localOnlyRow,
+                bubbleKey: _bubbleKey,
+                onTap: () => _openAvatarMenu(context, ref, last),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Opens the context menu for the group's last message.
+  void _openAvatarMenu(BuildContext context, WidgetRef ref, Message last) {
+    final app = ref.read(appStateProvider);
+    final target = ctxTargetForMessage(last,
+        selfPubkey: app.selfPubkey, liveNym: app.users[last.pubkey]?.nym);
+    ContextMenuPanel.show(
+      context,
+      target: target,
+      message: last,
+      onReact: () => widget.onReactionPicker?.call(last),
+    );
+  }
+}
+
+class _StickyGroupAvatar extends ConsumerStatefulWidget {
+  const _StickyGroupAvatar({
+    required this.pubkey,
+    required this.imageUrl,
+    required this.onTap,
+    this.bubbleKey,
+    this.localOnly = false,
+  });
+
+  final String pubkey;
+  final String? imageUrl;
+  final bool localOnly;
+  final VoidCallback onTap;
+
+  /// Aligns the resting avatar to the last bubble rather than the reactions/translation rows; null uses the foot.
+  final GlobalKey? bubbleKey;
+
+  @override
+  ConsumerState<_StickyGroupAvatar> createState() =>
+      _StickyGroupAvatarState();
+}
+
+class _StickyGroupAvatarState extends ConsumerState<_StickyGroupAvatar> {
+  static const double _avatar = 32;
+
+  @override
+  Widget build(BuildContext context) {
+    final position = Scrollable.maybeOf(context)?.position;
+    return Consumer(
+      builder: (context, ref, child) => _StickyAvatarTrack(
+        position: position,
+        bubbleKey: widget.bubbleKey,
+        hintTop: ref.watch(composerHintTopProvider),
+        overhang: ref.watch(composerOverhangProvider),
+        child: child,
+      ),
+      child: RepaintBoundary(
+        child: RowTap(
+          excludeFromSemantics: true,
+          onTap: widget.onTap,
+          child: NymAvatar(
+            seed: widget.pubkey,
+            size: _avatar,
+            imageUrl: widget.imageUrl,
+            localOnly: widget.localOnly,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StickyAvatarTrack extends SingleChildRenderObjectWidget {
+  const _StickyAvatarTrack({
+    required this.position,
+    required this.bubbleKey,
+    required this.hintTop,
+    required this.overhang,
+    required super.child,
+  });
+
+  final ScrollPosition? position;
+  final GlobalKey? bubbleKey;
+  final double? hintTop;
+  final double overhang;
+
+  @override
+  RenderStickyAvatarTrack createRenderObject(BuildContext context) =>
+      RenderStickyAvatarTrack(position, bubbleKey, hintTop, overhang);
+
+  @override
+  void updateRenderObject(
+      BuildContext context, RenderStickyAvatarTrack renderObject) {
+    renderObject
+      ..position = position
+      ..bubbleKey = bubbleKey
+      ..hintTop = hintTop
+      ..overhang = overhang;
+  }
+}
+
+class RenderStickyAvatarTrack extends RenderProxyBox {
+  RenderStickyAvatarTrack(
+      this._position, this._bubbleKey, this._hintTop, this._overhang);
+
+  static const double _avatar = 32;
+
+  ScrollPosition? _position;
+  GlobalKey? _bubbleKey;
+  double? _hintTop;
+  double _overhang;
+  double _top = 0;
+
+  double get avatarTop => _top;
+
+  set position(ScrollPosition? value) {
+    if (identical(value, _position)) return;
+    if (attached) _position?.removeListener(markNeedsPaint);
+    _position = value;
+    if (attached) _position?.addListener(markNeedsPaint);
+    markNeedsPaint();
+  }
+
+  set bubbleKey(GlobalKey? value) {
+    if (identical(value, _bubbleKey)) return;
+    _bubbleKey = value;
+    markNeedsPaint();
+  }
+
+  set hintTop(double? value) {
+    if (value == _hintTop) return;
+    _hintTop = value;
+    markNeedsPaint();
+  }
+
+  set overhang(double value) {
+    if (value == _overhang) return;
+    _overhang = value;
+    markNeedsPaint();
+  }
+
+  @override
+  bool get isRepaintBoundary => true;
+
+  @override
+  void attach(PipelineOwner owner) {
+    super.attach(owner);
+    _position?.addListener(markNeedsPaint);
+  }
+
+  @override
+  void detach() {
+    _position?.removeListener(markNeedsPaint);
+    super.detach();
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) => constraints.biggest;
+
+  @override
+  void performLayout() {
+    size = constraints.biggest;
+    child?.layout(BoxConstraints.tight(const Size(_avatar, _avatar)));
+  }
+
+  double _restingTop() {
+    final fallback = math.max(0.0, size.height - _avatar);
+    final bubble = _bubbleKey?.currentContext?.findRenderObject();
+    if (bubble is RenderBox && bubble.attached && bubble.hasSize) {
+      final bubbleBottom = bubble
+          .localToGlobal(Offset(0, bubble.size.height), ancestor: this)
+          .dy;
+      return (bubbleBottom - _avatar).clamp(0.0, fallback);
+    }
+    return fallback;
+  }
+
+  double _computeTop(double maxTop) {
+    if (_position == null) return maxTop;
+    final RenderObject? viewport = RenderAbstractViewport.maybeOf(this);
+    if (viewport is RenderBox && viewport.hasSize) {
+      final box = viewport;
+      final trackTop = localToGlobal(Offset.zero, ancestor: box).dy;
+      final lift = floatLiftOver(
+          _hintTop, box.localToGlobal(Offset(0, box.size.height)).dy);
+      final desired = box.size.height -
+          ChatFabs.floatBottom -
+          lift -
+          _avatar -
+          trackTop;
+      return desired.clamp(0.0, maxTop);
+    }
+    return maxTop;
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final child = this.child;
+    if (child == null) return;
+    _top = _computeTop(_restingTop());
+    context.paintChild(child, offset + Offset(0, _top));
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    final child = this.child;
+    if (child == null) return false;
+    return result.addWithPaintOffset(
+      offset: Offset(0, _top),
+      position: position,
+      hitTest: (result, transformed) =>
+          child.hitTest(result, position: transformed),
+    );
+  }
+
+  @override
+  void applyPaintTransform(RenderBox child, Matrix4 transform) {
+    transform.multiply(Matrix4.translationValues(0, _top, 0));
+  }
+}
+
+/// 240ms overshoot snap-in for a live consecutive bubble; each keyframe segment uses the same cubic.
+class _BubbleSnapIn extends StatefulWidget {
+  const _BubbleSnapIn({required this.self, required this.child});
+
+  final bool self;
+  final Widget child;
+
+  @override
+  State<_BubbleSnapIn> createState() => _BubbleSnapInState();
+}
+
+class _BubbleSnapInState extends State<_BubbleSnapIn>
+    with SingleTickerProviderStateMixin {
+  static const Cubic _overshoot = Cubic(0.34, 1.56, 0.64, 1);
+
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 240),
+  )..forward();
+
+  late final Animation<double> _dy = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: -6.0, end: 2.0).chain(CurveTween(curve: _overshoot)),
+      weight: 55,
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: 2.0, end: -1.0).chain(CurveTween(curve: _overshoot)),
+      weight: 25,
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: -1.0, end: 0.0).chain(CurveTween(curve: _overshoot)),
+      weight: 20,
+    ),
+  ]).animate(_c);
+
+  late final Animation<double> _scale = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: 0.94, end: 1.02).chain(CurveTween(curve: _overshoot)),
+      weight: 55,
+    ),
+    TweenSequenceItem(
+      tween:
+          Tween(begin: 1.02, end: 0.995).chain(CurveTween(curve: _overshoot)),
+      weight: 25,
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: 0.995, end: 1.0).chain(CurveTween(curve: _overshoot)),
+      weight: 20,
+    ),
+  ]).animate(_c);
+
+  late final Animation<double> _opacity = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: 0.0, end: 1.0).chain(CurveTween(curve: _overshoot)),
+      weight: 55,
+    ),
+    TweenSequenceItem(tween: ConstantTween(1.0), weight: 45),
+  ]).animate(_c);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, child) => Opacity(
+        // The overshoot cubic exceeds 1.0 mid-segment, so opacity must clamp.
+        opacity: _opacity.value.clamp(0.0, 1.0),
+        child: Transform.translate(
+          offset: Offset(0, _dy.value),
+          child: Transform.scale(
+            scale: _scale.value,
+            alignment: widget.self
+                ? Alignment.bottomRight
+                : Alignment.bottomLeft,
+            child: child,
+          ),
+        ),
+      ),
+      child: widget.child,
+    );
+  }
+}
+
+/// Touch-only swipe-to-act; also hosts long-press quick-react and desktop double-click quote.
+class _SwipeToAct extends StatefulWidget {
+  const _SwipeToAct({
+    required this.settings,
+    required this.applies,
+    required this.onAction,
+    required this.onDoubleClick,
+    required this.onLongPressStart,
+    required this.onSecondaryTap,
+    required this.onSecondaryClick,
+    this.avatarDx,
+    this.swipeReactEmojiUrl,
+    required this.child,
+  });
+
+  final Settings settings;
+
+  final bool Function(String action) applies;
+
+  final ValueChanged<String> onAction;
+  final ValueChanged<Offset> onDoubleClick;
+
+  final GestureLongPressStartCallback onLongPressStart;
+  final VoidCallback onSecondaryTap;
+  final ValueChanged<Offset> onSecondaryClick;
+
+  /// Group avatar offset channel for an others' group's last bubble; also selects the past-avatar indicator inset.
+  final ValueNotifier<double>? avatarDx;
+
+  /// Null uses the emoji text glyph.
+  final String? swipeReactEmojiUrl;
+  final Widget child;
+
+  @override
+  State<_SwipeToAct> createState() => _SwipeToActState();
+}
+
+class _SwipeToActState extends State<_SwipeToAct>
+    with SingleTickerProviderStateMixin {
+  static const double _swipeStart = 16;
+  static const double _edgeZone = 50;
+  static const double _followCap = kSwipeFollowCap;
+
+  // Created in initState: a lazy field would create a ticker during dispose for never-swiped rows.
+  AnimationController? _settleCtl;
+  AnimationController get _settle => _settleCtl ??= AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 250),
+      );
+
+  Offset? _clickFrom;
+  Offset? _lastClickAt;
+  Duration? _lastClickTime;
+  int _clicks = 0;
+
+  void _clickDown(PointerDownEvent e) {
+    if (e.kind != PointerDeviceKind.mouse || e.buttons != kPrimaryButton) {
+      _clicks = 0;
+      _clickFrom = null;
+      return;
+    }
+    final last = _lastClickAt;
+    final lastTime = _lastClickTime;
+    final chained = last != null &&
+        lastTime != null &&
+        (e.position - last).distance <= kDoubleTapSlop &&
+        e.timeStamp - lastTime <= kDoubleTapTimeout;
+    _clicks = chained ? _clicks + 1 : 1;
+    _clickFrom = e.position;
+  }
+
+  void _clickUp(PointerUpEvent e) {
+    final from = _clickFrom;
+    _clickFrom = null;
+    if (from == null || (e.position - from).distance > kTouchSlop) {
+      _clicks = 0;
+      _lastClickAt = null;
+      return;
+    }
+    _lastClickAt = e.position;
+    _lastClickTime = e.timeStamp;
+    if (_clicks == 2) widget.onDoubleClick(e.position);
+  }
+
+  double _dx = 0;
+  double _travel = 0; // Raw finger dx since touch-down.
+  int _dir = 0; // Locked at claim: -1 left, +1 right.
+  String _action = 'none';
+  bool _active = false;
+  bool _abandoned = false; // Edge zone or 'none' action.
+  bool _thresholdFired = false; // Re-arms below the threshold.
+  bool _indicatorLit = false; // Frozen at release for the linger.
+  double _startX = 0;
+  double _startY = 0;
+
+  @override
+  void dispose() {
+    widget.avatarDx?.value = 0;
+    _settleCtl?.dispose();
+    super.dispose();
+  }
+
+  double get _threshold => swipeThresholdPx(widget.settings.swipeThreshold);
+
+  void _setDx(double v) {
+    setState(() => _dx = v);
+    widget.avatarDx?.value = v;
+  }
+
+  void _onStart(DragStartDetails d) {
+    _active = false;
+    _abandoned = false;
+    _thresholdFired = false;
+    _indicatorLit = false;
+    _dir = 0;
+    _action = 'none';
+    _travel = 0;
+    // DragStartBehavior.down makes this the touch-down point.
+    _startX = d.globalPosition.dx;
+    _startY = d.globalPosition.dy;
+    _settleCtl?.stop();
+    if (_dx != 0) _setDx(0);
+  }
+
+  void _onUpdate(DragUpdateDetails d) {
+    if (_abandoned) return;
+    // Travel is measured from touch-down, including pre-arena slop, so the thresholds match finger distance.
+    _travel += d.delta.dx;
+    if (!_active) {
+      if (_travel.abs() <= _swipeStart) return;
+      // Claim only when horizontal travel exceeds 1.5x vertical; diagonals stay with the scroller.
+      final dy = (d.globalPosition.dy - _startY).abs();
+      if (_travel.abs() <= dy * 1.5) return;
+      // Locked here; dragging back across the origin can't flip the action.
+      final dir = _travel < 0 ? -1 : 1;
+      final width = MediaQuery.sizeOf(context).width;
+      if ((dir > 0 && _startX < _edgeZone) ||
+          (dir < 0 && _startX > width - _edgeZone)) {
+        _abandoned = true;
+        return;
+      }
+      final action = dir < 0
+          ? widget.settings.swipeLeftAction
+          : widget.settings.swipeRightAction;
+      if (!widget.applies(action)) {
+        _abandoned = true;
+        return;
+      }
+      _dir = dir;
+      _action = action;
+      _active = true;
+    }
+    final double dist = (_dir * _travel).clamp(0.0, _followCap);
+    final past = dist >= _threshold;
+    if (past && !_thresholdFired) {
+      Haptics.selection();
+      _thresholdFired = true;
+    } else if (!past) {
+      _thresholdFired = false;
+    }
+    _indicatorLit = past;
+    _setDx(_dir * dist);
+  }
+
+  void _onEnd(DragEndDetails d) {
+    // Commit at release past the threshold with the action locked at claim.
+    if (_active && !_abandoned && _dx.abs() >= _threshold) {
+      widget.onAction(_action);
+    }
+    _springBack();
+  }
+
+  void _onCancel() => _springBack();
+
+  void _springBack() {
+    _active = false;
+    _abandoned = false;
+    _thresholdFired = false;
+    final from = _dx;
+    if (from == 0) {
+      setState(() {
+        _dir = 0;
+        _indicatorLit = false;
+      });
+      return;
+    }
+    final anim = CurvedAnimation(parent: _settle, curve: Curves.easeOut);
+    void tick() => _setDx(from * (1 - anim.value));
+    anim.addListener(tick);
+    _settle.forward(from: 0).whenCompleteOrCancel(() {
+      anim.removeListener(tick);
+      if (!mounted) return;
+      setState(() {
+        _dx = 0;
+        _dir = 0;
+        _indicatorLit = false;
+      });
+      widget.avatarDx?.value = 0;
+    });
+  }
+
+  String? _actionSvg(String action) {
+    switch (action) {
+      case 'quote':
+        return ctxActionSvg(CtxAction.quote);
+      case 'translate':
+        return ctxActionSvg(CtxAction.translate);
+      case 'copy':
+        return ctxActionSvg(CtxAction.copyMessage);
+      case 'react':
+        return null;
+      case 'zap':
+        return ctxActionSvg(CtxAction.zap);
+      case 'slap':
+        return ctxActionSvg(CtxAction.slap);
+      case 'hug':
+        return ctxActionSvg(CtxAction.hug);
+      default:
+        return null;
+    }
+  }
+
+  /// Swipe indicator chip riding 40px outside the leaving edge inside the translated row; visible past the threshold.
+  Widget _buildIndicator(BuildContext context) {
+    final c = context.nym;
+    Widget glyph;
+    if (_action == 'react') {
+      final fallback = Text(
+        widget.settings.swipeReactEmoji,
+        style: const TextStyle(fontSize: 23, height: 1),
+      );
+      final url = widget.swipeReactEmojiUrl;
+      glyph = url == null
+          ? fallback
+          : InlineNetworkImage(
+              url: proxiedMedia(url, emoji: true),
+              width: 28,
+              height: 28,
+              fit: BoxFit.contain,
+              retryOnError: true,
+              errorChild: fallback,
+            );
+    } else {
+      final svg = _actionSvg(_action);
+      glyph = svg == null
+          ? const SizedBox.shrink()
+          : NymSvgIcon(svg, size: 16, color: c.primary);
+    }
+    // Right swipes beside the group avatar park the chip past it.
+    final pastAvatar = _dir > 0 && widget.avatarDx != null;
+    return Positioned(
+      top: 0,
+      bottom: 0,
+      right: _dir < 0 ? -40 : null,
+      left: _dir < 0 ? null : (pastAvatar ? -86 : -40),
+      child: Center(
+        child: AnimatedOpacity(
+          opacity: _indicatorLit ? 1 : 0,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.ease,
+          child: Container(
+            width: 32,
+            height: 32,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: c.primaryA(0.15),
+            ),
+            child: glyph,
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // The chip rides inside the translated subtree so it follows the finger.
+    Widget body = widget.child;
+    if (_dir != 0) {
+      body = Stack(
+        clipBehavior: Clip.none,
+        children: [
+          widget.child,
+          _buildIndicator(context),
+        ],
+      );
+    }
+
+    final mouse = PointerInput.mouseOf(context);
+    Widget result = Transform.translate(
+      offset: Offset(_dx, 0),
+      child: body,
+    );
+    if (mouse) {
+      result = Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: _clickDown,
+        onPointerUp: _clickUp,
+        onPointerCancel: (_) => _clickFrom = null,
+        child: result,
+      );
+    }
+    return RawGestureDetector(
+      behavior: HitTestBehavior.translucent,
+      gestures: <Type, GestureRecognizerFactory>{
+        if (!mouse)
+          TapGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+            () => TapGestureRecognizer(debugOwner: this),
+            (r) => r.onSecondaryTap = widget.onSecondaryTap,
+          ),
+        if (mouse)
+          _SecondaryClickRecognizer:
+              GestureRecognizerFactoryWithHandlers<_SecondaryClickRecognizer>(
+            () => _SecondaryClickRecognizer(debugOwner: this),
+            (r) => r.onClick = widget.onSecondaryClick,
+          ),
+        _TightLongPressGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+            _TightLongPressGestureRecognizer>(
+          () => _TightLongPressGestureRecognizer(debugOwner: this),
+          (r) => r..onLongPressStart = widget.onLongPressStart,
+        ),
+        if (widget.settings.gesturesEnabled)
+          _SwipeDragRecognizer: GestureRecognizerFactoryWithHandlers<
+              _SwipeDragRecognizer>(
+            () => _SwipeDragRecognizer(
+              supportedDevices: const {PointerDeviceKind.touch},
+            ),
+            (r) => r
+              ..dragStartBehavior = DragStartBehavior.down
+              ..onStart = _onStart
+              ..onUpdate = _onUpdate
+              ..onEnd = _onEnd
+              ..onCancel = _onCancel,
+          ),
+      },
+      child: result,
+    );
+  }
+}
+
+class _SwipeDragRecognizer extends HorizontalDragGestureRecognizer {
+  _SwipeDragRecognizer({super.supportedDevices});
+
+  static const double _ratio = 1.5;
+
+  final Map<int, Offset> _moved = {};
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    _moved[event.pointer] = Offset.zero;
+    super.addAllowedPointer(event);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerMoveEvent) {
+      _moved[event.pointer] = (_moved[event.pointer] ?? Offset.zero) + event.delta;
+    } else if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _moved.remove(event.pointer);
+    }
+    super.handleEvent(event);
+  }
+
+  @override
+  bool hasSufficientGlobalDistanceToAccept(
+    PointerDeviceKind pointerDeviceKind,
+    double? deviceTouchSlop,
+  ) {
+    if (!super.hasSufficientGlobalDistanceToAccept(
+        pointerDeviceKind, deviceTouchSlop)) {
+      return false;
+    }
+    final total = _moved.values.fold(Offset.zero, (a, b) => a + b);
+    return total.dx.abs() > total.dy.abs() * _ratio;
+  }
+
+  @override
+  void dispose() {
+    _moved.clear();
+    super.dispose();
+  }
+}
+
+/// Rejects the pending hold on >5px movement before the deadline, tighter than the default slop.
+class _TightLongPressGestureRecognizer extends LongPressGestureRecognizer {
+  _TightLongPressGestureRecognizer({super.debugOwner});
+
+  static const double _moveThreshold = 5;
+
+  Offset _downPosition = Offset.zero;
+  Duration _downTime = Duration.zero;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    if (event.pointer == primaryPointer) {
+      _downPosition = event.position;
+      _downTime = event.timeStamp;
+    }
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerMoveEvent &&
+        event.pointer == primaryPointer &&
+        state == GestureRecognizerState.possible &&
+        event.timeStamp - _downTime < (deadline ?? kLongPressTimeout) &&
+        (event.position - _downPosition).distance > _moveThreshold) {
+      resolve(GestureDisposition.rejected);
+      stopTrackingPointer(event.pointer);
+      return;
+    }
+    super.handleEvent(event);
+  }
+}
+
+/// Bluetooth glyph for a message delivered over the mesh.
+class _MeshBadge extends StatelessWidget {
+  const _MeshBadge({required this.color});
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 3),
+      child: NymSvgIcon(NymIcons.bluetooth, size: 11, color: color),
+    );
+  }
+}
+
+/// Body for a mesh-received local file: images inline (fullscreen on tap), others as a shareable file card.
+class _LocalMediaBody extends StatelessWidget {
+  const _LocalMediaBody({
+    required this.path,
+    required this.mime,
+    required this.name,
+    required this.colors,
+  });
+
+  final String path;
+  final String? mime;
+  final String? name;
+  final NymColors colors;
+
+  bool get _isImage => mime?.startsWith('image/') ?? false;
+
+  /// Memoized reads so rebuilds don't restart `readAsBytes()` and flicker the image.
+  static final Map<String, Future<Uint8List>> _bytesCache = {};
+
+  static Future<Uint8List> _read(String path) {
+    final cached = _bytesCache[path];
+    if (cached != null) return cached;
+    // Soft cap so a long session can't grow the cache unbounded.
+    if (_bytesCache.length > 80) _bytesCache.clear();
+    return _bytesCache[path] = MeshFileStore.instance.read(path);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isImage) {
+      return FutureBuilder<Uint8List>(
+        future: _read(path),
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return _placeholder();
+          }
+          final bytes = snap.data;
+          if (bytes == null || bytes.isEmpty) return _fileCard(context);
+          return GestureDetector(
+            onTap: () => _openFullscreen(context, bytes),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(
+                    maxWidth: 260, maxHeight: 320, minWidth: 80),
+                child: Image.memory(bytes,
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                    // Decode at tile size; the full bytes are kept for fullscreen.
+                    cacheWidth: (260 *
+                            MediaQuery.devicePixelRatioOf(context) *
+                            1.5)
+                        .ceil()),
+              ),
+            ),
+          );
+        },
+      );
+    }
+    return _fileCard(context);
+  }
+
+  Widget _placeholder() => Container(
+        width: 160,
+        height: 120,
+        decoration: BoxDecoration(
+          color: colors.bg,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: colors.border),
+        ),
+        child: Center(
+          child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(
+                strokeWidth: 2, color: colors.textDim),
+          ),
+        ),
+      );
+
+  Widget _fileCard(BuildContext context) {
+    final label = (name != null && name!.isNotEmpty) ? name! : 'File';
+    return GestureDetector(
+      onTap: () => _shareFile(context),
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 260),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: colors.bg,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: colors.border),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            NymSvgIcon(NymIcons.fileOffer, size: 20, color: colors.primary),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    TextStyle(color: colors.text, fontWeight: FontWeight.w500),
+              ),
+            ),
+            const SizedBox(width: 8),
+            NymSvgIcon(NymIcons.shareNodes, size: 16, color: colors.textDim),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _shareFile(BuildContext context) async {
+    try {
+      final origin = shareOriginOf(context);
+      final bytes = await _read(path);
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile.fromData(bytes, mimeType: mime, name: name)],
+        sharePositionOrigin: origin,
+      ));
+    } catch (_) {
+      // Sharing unavailable (desktop/test).
+    }
+  }
+
+  void _openFullscreen(BuildContext context, Uint8List bytes) {
+    Navigator.of(context).push(PageRouteBuilder<void>(
+      opaque: false,
+      barrierColor: Colors.black87,
+      pageBuilder: (_, _, _) => FullscreenImageView(
+        bytes: bytes,
+        onShare: _shareFile,
+        colors: colors,
+      ),
+    ));
+  }
+}
+
+class FullscreenImageView extends StatelessWidget {
+  const FullscreenImageView({
+    super.key,
+    required this.bytes,
+    required this.onShare,
+    required this.colors,
+  });
+
+  final Uint8List bytes;
+  final Future<void> Function(BuildContext context) onShare;
+  final NymColors colors;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Stack(
+        children: [
+          GestureDetector(
+            onTap: () => Navigator.of(context).maybePop(),
+            child: InteractiveViewer(
+              minScale: 1,
+              maxScale: 5,
+              child: Center(child: Image.memory(bytes)),
+            ),
+          ),
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 8,
+            right: 8,
+            child: DuoRailSwap(
+              items: [
+                duoCloseItem(() => Navigator.of(context).maybePop()),
+                DuoRailItem(
+                    id: 'viewer-share',
+                    label: tr('Share'),
+                    icon: Icons.share,
+                    onTap: () => onShare(context)),
+              ],
+              child: Row(
+                children: [
+                  Builder(
+                    builder: (button) => IconButton(
+                      icon: const Icon(Icons.share, color: Colors.white),
+                      onPressed: () => onShare(button),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.of(context).maybePop(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimeFoot extends MultiChildRenderObjectWidget {
+  _TimeFoot({required Widget body, required Widget time})
+      : super(children: [body, time]);
+
+  @override
+  RenderTimeFoot createRenderObject(BuildContext context) =>
+      RenderTimeFoot(Directionality.of(context));
+
+  @override
+  void updateRenderObject(BuildContext context, RenderTimeFoot renderObject) {
+    renderObject.textDirection = Directionality.of(context);
+  }
+}
+
+class TimeFootParentData extends ContainerBoxParentData<RenderBox> {}
+
+class RenderTimeFoot extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, TimeFootParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, TimeFootParentData> {
+  RenderTimeFoot(this._textDirection);
+
+  static const double gap = 4;
+
+  TextDirection _textDirection;
+
+  set textDirection(TextDirection value) {
+    if (value == _textDirection) return;
+    _textDirection = value;
+    markNeedsLayout();
+  }
+
+  RenderBox get _body => firstChild!;
+  RenderBox get _time => lastChild!;
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! TimeFootParentData) {
+      child.parentData = TimeFootParentData();
+    }
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) => math.max(
+      _body.getMinIntrinsicWidth(double.infinity),
+      _time.getMinIntrinsicWidth(double.infinity));
+
+  @override
+  double computeMaxIntrinsicWidth(double height) => math.max(
+      _body.getMaxIntrinsicWidth(double.infinity),
+      _time.getMaxIntrinsicWidth(double.infinity));
+
+  @override
+  double computeMinIntrinsicHeight(double width) =>
+      _body.getMinIntrinsicHeight(width) +
+      gap +
+      _time.getMinIntrinsicHeight(width);
+
+  @override
+  double computeMaxIntrinsicHeight(double width) =>
+      _body.getMaxIntrinsicHeight(width) +
+      gap +
+      _time.getMaxIntrinsicHeight(width);
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final body =
+        _body.getDryLayout(BoxConstraints(maxWidth: constraints.maxWidth));
+    final time = _time.getDryLayout(const BoxConstraints());
+    return constraints.constrain(Size(
+        math.max(body.width, math.min(time.width, constraints.maxWidth)),
+        body.height + gap + time.height));
+  }
+
+  @override
+  void performLayout() {
+    _body.layout(BoxConstraints(maxWidth: constraints.maxWidth),
+        parentUsesSize: true);
+    _time.layout(const BoxConstraints(), parentUsesSize: true);
+    final body = _body.size;
+    final time = _time.size;
+    size = constraints.constrain(Size(
+        math.max(body.width, math.min(time.width, constraints.maxWidth)),
+        body.height + gap + time.height));
+    (_body.parentData! as TimeFootParentData).offset = Offset(
+        _textDirection == TextDirection.rtl ? size.width - body.width : 0, 0);
+    (_time.parentData! as TimeFootParentData).offset =
+        Offset(size.width - time.width, size.height - time.height);
+  }
+
+  @override
+  double? computeDistanceToActualBaseline(TextBaseline baseline) =>
+      defaultComputeDistanceToHighestActualBaseline(baseline);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
+}
+
+const Object _kAuthorTag = Object();
+
+class _SecondaryClickRecognizer extends OneSequenceGestureRecognizer {
+  _SecondaryClickRecognizer({super.debugOwner})
+      : super(
+          supportedDevices: const {PointerDeviceKind.mouse},
+          allowedButtonsFilter: (b) => b == kSecondaryButton,
+        );
+
+  ValueChanged<Offset>? onClick;
+  Offset? _from;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    _from = event.position;
+    resolve(GestureDisposition.accepted);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerUpEvent) {
+      final from = _from;
+      _from = null;
+      stopTrackingPointer(event.pointer);
+      if (from != null) onClick?.call(event.position);
+    } else if (event is PointerCancelEvent) {
+      _from = null;
+      stopTrackingPointer(event.pointer);
+    }
+  }
+
+  @override
+  void didStopTrackingLastPointer(int pointer) {}
+
+  @override
+  String get debugDescription => 'secondary click';
+}
+
+class _CopyMenuRoute extends OverlayRoute<void> {
+  _CopyMenuRoute({required this.builder, required this.onGone})
+      : super(requestFocus: false);
+
+  final WidgetBuilder builder;
+  final void Function(_CopyMenuRoute route) onGone;
+
+  @override
+  Iterable<OverlayEntry> createOverlayEntries() =>
+      [OverlayEntry(builder: builder)];
+
+  @override
+  void didComplete(void result) {
+    super.didComplete(result);
+    onGone(this);
+  }
+}

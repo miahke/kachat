@@ -1,0 +1,132 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file(System.getenv('NYM_KEY_PROPERTIES') ?: 'key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+def ringFcmProperties = new Properties()
+def ringFcmPropertiesFile = rootProject.file('fcm.properties')
+def ringFcmEnabled = ringFcmPropertiesFile.exists()
+if (ringFcmEnabled) {
+    ringFcmProperties.load(new FileInputStream(ringFcmPropertiesFile))
+}
+
+android {
+    namespace = "com.nym.bar"
+    compileSdk = 36
+    // Use NDK r27+ for 16 KB page-size support
+    ndkVersion = "28.2.13676358"
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        // Required for libraries that use newer Java APIs on older Android versions
+        coreLibraryDesugaringEnabled = true
+    }
+
+    signingConfigs {
+       release {
+           keyAlias keystoreProperties['keyAlias']
+           keyPassword keystoreProperties['keyPassword']
+           storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+           storePassword keystoreProperties['storePassword']
+       }
+    }
+
+    defaultConfig {
+        applicationId "com.panchat.nym"
+        // Explicit floor (not flutter.minSdkVersion, which the AGP 8.9.1 upgrade
+        // switched to) so the minimum required by flutter_webrtc / local_auth
+        // (>=23) is pinned in-repo and can't silently drift with the Flutter SDK.
+        // 24 matches the current flutter.minSdkVersion, so runtime coverage is
+        // unchanged.
+        minSdk = 29
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        targetSdk = 36
+        versionCode = 878
+        versionName = flutter.versionName
+        
+        // Support all ABIs - AGP 8.9.1 automatically handles 16 KB alignment
+        // Flutter supplies ABI splits when --split-per-abi is requested.
+        if (project.findProperty('split-per-abi') != 'true') {
+            ndk {
+                abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+            }
+        }
+
+        if (ringFcmEnabled) {
+            resValue "string", "fcm_app_id", ringFcmProperties['appId']
+            resValue "string", "fcm_api_key", ringFcmProperties['apiKey']
+            resValue "string", "fcm_project_id", ringFcmProperties['projectId']
+            resValue "string", "fcm_sender_id", ringFcmProperties['senderId']
+        }
+    }
+
+    sourceSets {
+        main {
+            if (ringFcmEnabled) {
+                java.srcDirs += 'src/fcm/kotlin'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.release
+        }
+    }
+    
+    // qWDTT is an embedded PIE executable and must be extracted to nativeLibraryDir.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            keepDebugSymbols += ["**/libbitchat_vk.so"]
+        }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+    androidTestImplementation 'androidx.test:runner:1.5.0'
+    androidTestImplementation 'androidx.test.ext:junit:1.3.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2'
+    implementation 'com.github.mwiede:jsch:2.28.8'
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.85'
+    implementation 'com.google.code.gson:gson:2.13.2'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+    // Enable Java 8+ API desugaring across app and transitive dependencies
+    // This satisfies AAR metadata requirements from flutter_local_notifications
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
+
+    // Play Integrity: the signed verdict the attestation ledger accepts as
+    // proof that this really is the published app on a sound device.
+    implementation 'com.google.android.play:integrity:1.4.0'
+
+    implementation 'androidx.biometric:biometric:1.1.0'
+    implementation 'com.google.zxing:core:3.5.3'
+    implementation 'androidx.credentials:credentials:1.6.0'
+    implementation 'androidx.credentials:credentials-play-services-auth:1.6.0'
+
+    if (ringFcmEnabled) {
+        implementation 'com.google.firebase:firebase-messaging:24.1.1'
+    }
+}

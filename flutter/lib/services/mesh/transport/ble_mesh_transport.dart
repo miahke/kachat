@@ -1,0 +1,481 @@
+import 'dart:async';
+
+import 'package:bluetooth_low_energy/bluetooth_low_energy.dart';
+import 'package:flutter/foundation.dart';
+
+import '../mesh_constants.dart';
+import 'bluetooth_name_repair.dart';
+import 'mesh_transport.dart';
+
+/// Production BLE transport running both GATT roles at once, bitchat's dual-role flood; frames are opaque here.
+class BleMeshTransport implements MeshTransport {
+  /// [advertisedName] is our peerID; bitchat advertises it as the BLE device name.
+  BleMeshTransport(String advertisedName)
+      : _advertisedNameString = advertisedName;
+
+  /// Diagnostic sink for the on-screen mesh log; null in tests.
+  static void Function(String line)? debugLog;
+
+  void _log(String line) => debugLog?.call('ble: $line');
+
+  final CentralManager _central = CentralManager();
+  final PeripheralManager _peripheral = PeripheralManager();
+
+  final UUID _serviceUuid = UUID.fromString(MeshConstants.serviceUuid);
+  final UUID _characteristicUuid =
+      UUID.fromString(MeshConstants.characteristicUuid);
+
+  final _inbound = StreamController<MeshInboundFrame>.broadcast();
+  final _links = StreamController<MeshLinkEvent>.broadcast();
+  final _availabilityChanges =
+      StreamController<MeshTransportAvailability>.broadcast();
+
+  /// Fires on availability changes; iOS reports `unknown` at start and flips to `ready` later.
+  Stream<MeshTransportAvailability> get availabilityChanged =>
+      _availabilityChanges.stream;
+
+  void _setAvailability(MeshTransportAvailability next) {
+    if (next == _availability) return;
+    _availability = next;
+    if (!_availabilityChanges.isClosed) _availabilityChanges.add(next);
+  }
+
+  final List<StreamSubscription<dynamic>> _subs = [];
+
+  /// Peripherals we are connected to as central, keyed by peer UUID.
+  final Map<String, _CentralLink> _centralLinks = {};
+
+  /// Centrals subscribed to our characteristic (peripheral role).
+  final Map<String, Central> _subscribedCentrals = {};
+
+  GATTCharacteristic? _localCharacteristic;
+
+  MeshTransportAvailability _availability = MeshTransportAvailability.unknown;
+  bool _started = false;
+
+  /// Per-role active flags so repeated power-on events can't double-start; reset on power-off.
+  bool _scanning = false;
+  bool _advertising = false;
+
+  /// Single-flight guards: overlapping bring-ups could advertise the service with an empty GATT.
+  bool _centralStarting = false;
+  bool _peripheralStarting = false;
+
+  final String _advertisedNameString;
+
+  @visibleForTesting
+  static Advertisement meshAdvertisement({
+    required TargetPlatform platform,
+    required String peerID,
+    required UUID serviceUuid,
+  }) =>
+      Advertisement(
+        name: platform == TargetPlatform.android ? null : peerID,
+        serviceUUIDs: [serviceUuid],
+      );
+
+  @visibleForTesting
+  static bool acceptsDiscovered(Advertisement advertisement, UUID serviceUuid) =>
+      advertisement.serviceUUIDs.isEmpty ||
+      advertisement.serviceUUIDs.contains(serviceUuid);
+
+  @override
+  MeshTransportAvailability get availability => _availability;
+
+  @override
+  int get connectedLinkCount =>
+      _centralLinks.length + _subscribedCentrals.length;
+
+  @override
+  Stream<MeshInboundFrame> get inbound => _inbound.stream;
+
+  @override
+  Stream<MeshLinkEvent> get links => _links.stream;
+
+  @override
+  Future<MeshTransportAvailability> start() async {
+    if (_started) return _availability;
+    _started = true;
+    _log(
+        'start(): bringing up central+peripheral (peerID=$_advertisedNameString)');
+
+    // Wire state listeners before awaiting authorize(), or iOS's early power-on event can be missed.
+    _wireCentral();
+    _wirePeripheral();
+
+    _subs.add(_central.stateChanged.listen((e) {
+      _setAvailability(_mapState(e.state));
+      _log('central state → ${e.state.name}');
+      if (e.state == BluetoothLowEnergyState.poweredOn) {
+        unawaited(_beginCentral());
+      } else {
+        _scanning = false;
+      }
+    }));
+    // iOS peripheral role has its own state; advertising must start when the peripheral manager powers on.
+    _subs.add(_peripheral.stateChanged.listen((e) {
+      _log('peripheral state → ${e.state.name}');
+      if (e.state == BluetoothLowEnergyState.poweredOn) {
+        unawaited(_beginPeripheral());
+      } else {
+        _advertising = false;
+      }
+    }));
+
+    try {
+      await _central.authorize();
+      await _peripheral.authorize();
+    } catch (e) {
+      // authorize() throws on platforms that grant implicitly.
+      _log('authorize() threw (implicit-grant platform?): $e');
+    }
+
+    _setAvailability(_mapState(_central.state));
+    _log('initial state: central=${_central.state.name} '
+        'peripheral=${_peripheral.state.name} → ${_availability.name}');
+
+    // A manager may already be powered on; the listener only covers future transitions.
+    if (_central.state == BluetoothLowEnergyState.poweredOn) {
+      await _beginCentral();
+    }
+    if (_peripheral.state == BluetoothLowEnergyState.poweredOn) {
+      await _beginPeripheral();
+    }
+    return _availability;
+  }
+
+  @override
+  Future<void> stop() async {
+    _started = false;
+    _scanning = false;
+    _advertising = false;
+    _centralStarting = false;
+    _peripheralStarting = false;
+    _cooldownUntil.clear();
+    _failStreak.clear();
+    _connecting.clear();
+    _log('stop(): tearing down radio');
+    for (final s in _subs) {
+      await s.cancel();
+    }
+    _subs.clear();
+    try {
+      await _central.stopDiscovery();
+    } catch (_) {}
+    for (final link in _centralLinks.values) {
+      try {
+        await _central.disconnect(link.peripheral);
+      } catch (_) {}
+    }
+    _centralLinks.clear();
+    try {
+      await _peripheral.stopAdvertising();
+      await _peripheral.removeAllServices();
+    } catch (_) {}
+    _subscribedCentrals.clear();
+    _localCharacteristic = null;
+  }
+
+  @override
+  Future<void> broadcast(Uint8List frame) async {
+    // As central: write to every connected peripheral.
+    for (final link in _centralLinks.values.toList()) {
+      try {
+        await _central.writeCharacteristic(
+          link.peripheral,
+          link.characteristic,
+          value: frame,
+          type: GATTCharacteristicWriteType.withoutResponse,
+        );
+      } catch (_) {
+        // Dead link; the disconnect handler will prune it.
+      }
+    }
+    // As peripheral: notify every subscribed central.
+    final characteristic = _localCharacteristic;
+    if (characteristic != null) {
+      for (final central in _subscribedCentrals.values.toList()) {
+        try {
+          await _peripheral.notifyCharacteristic(
+            central,
+            characteristic,
+            value: frame,
+          );
+        } catch (_) {}
+      }
+    }
+  }
+
+  // Central role
+
+  void _wireCentral() {
+    _subs.add(_central.discovered.listen((e) => _onDiscovered(e)));
+    _subs
+        .add(_central.connectionStateChanged.listen(_onCentralConnectionState));
+    _subs.add(_central.characteristicNotified.listen((e) {
+      if (e.characteristic.uuid != _characteristicUuid) return;
+      _inbound.add(MeshInboundFrame(
+        data: Uint8List.fromList(e.value),
+        linkId: e.peripheral.uuid.toString(),
+      ));
+    }));
+  }
+
+  Future<void> _beginCentral() async {
+    if (_scanning || _centralStarting) return;
+    _centralStarting = true;
+    try {
+      await _central.startDiscovery(serviceUUIDs: [_serviceUuid]);
+      _scanning = true;
+      _log('scanning for mesh service');
+    } catch (e) {
+      _log('startDiscovery failed: $e');
+    } finally {
+      _centralStarting = false;
+    }
+  }
+
+  final Set<String> _connecting = {};
+
+  /// Exponential per-peer cooldown after link failures so unlinkable peers don't churn the radio.
+  final Map<String, DateTime> _cooldownUntil = {};
+  final Map<String, int> _failStreak = {};
+
+  static const Duration _cooldownBase = Duration(seconds: 15);
+  // Kept short so a briefly unready peer doesn't look dead for long.
+  static const Duration _cooldownMax = Duration(minutes: 1);
+
+  /// Bounds on each connect / GATT-discovery step, since iOS provides none.
+  static const Duration _connectTimeout = Duration(seconds: 10);
+  static const Duration _discoverTimeout = Duration(seconds: 8);
+
+  void _noteLinkFailure(String id) {
+    // Prune expired entries so rotating iOS peer UUIDs can't grow these maps unbounded.
+    final now = DateTime.now();
+    if (_cooldownUntil.length > 128) {
+      _cooldownUntil.removeWhere((_, until) => now.isAfter(until));
+      _failStreak.removeWhere((k, _) => !_cooldownUntil.containsKey(k));
+    }
+    final n = (_failStreak[id] ?? 0) + 1;
+    _failStreak[id] = n;
+    var shift = n - 1;
+    if (shift > 10) shift = 10;
+    final ms = (_cooldownBase.inMilliseconds << shift)
+        .clamp(0, _cooldownMax.inMilliseconds)
+        .toInt();
+    _cooldownUntil[id] = now.add(Duration(milliseconds: ms));
+  }
+
+  void _noteLinkSuccess(String id) {
+    _failStreak.remove(id);
+    _cooldownUntil.remove(id);
+  }
+
+  Future<void> _onDiscovered(DiscoveredEventArgs e) async {
+    if (!acceptsDiscovered(e.advertisement, _serviceUuid)) return;
+    final id = e.peripheral.uuid.toString();
+    if (_centralLinks.containsKey(id) || _connecting.contains(id)) return;
+    final until = _cooldownUntil[id];
+    if (until != null && DateTime.now().isBefore(until)) return;
+    _connecting.add(id);
+    _log('discovered peer $id (rssi ${e.rssi}) — connecting');
+    try {
+      // iOS connect() has no timeout, so bound it or a stuck peer is never retried.
+      await _central.connect(e.peripheral).timeout(_connectTimeout);
+      // Best-effort MTU bump; iOS throws UnsupportedError because Core Bluetooth negotiates MTU itself.
+      try {
+        await _central.requestMTU(e.peripheral, mtu: MeshConstants.desiredMtu);
+      } catch (err) {
+        _log(
+            'requestMTU unsupported (${err.runtimeType}); using negotiated MTU');
+      }
+      var services =
+          await _central.discoverGATT(e.peripheral).timeout(_discoverTimeout);
+      var characteristic = _findCharacteristic(services);
+      if (characteristic == null) {
+        // Retry once: iOS may surface the service before its characteristics populate.
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        services =
+            await _central.discoverGATT(e.peripheral).timeout(_discoverTimeout);
+        characteristic = _findCharacteristic(services);
+      }
+      if (characteristic == null) {
+        // Log the peer's GATT to tell an empty GATT from a stale cache or UUID mismatch.
+        final dump = services
+            .map((s) => '${_shortUuid(s.uuid)}'
+                '[${s.characteristics.map((ch) => _shortUuid(ch.uuid)).join(' ')}]')
+            .join(' ');
+        _log('peer $id has no mesh characteristic — dropping (backing off); '
+            'gatt: ${dump.isEmpty ? '(no services)' : dump}');
+        _noteLinkFailure(id);
+        await _central.disconnect(e.peripheral);
+        return;
+      }
+      await _central.setCharacteristicNotifyState(
+        e.peripheral,
+        characteristic,
+        state: true,
+      );
+      _centralLinks[id] = _CentralLink(e.peripheral, characteristic);
+      _noteLinkSuccess(id);
+      _log('linked to peer $id (central role) — $connectedLinkCount link(s)');
+      _links.add(MeshLinkEvent(id, MeshLinkChange.connected, rssi: e.rssi));
+    } catch (err) {
+      _log('connect to $id failed: $err');
+      _noteLinkFailure(id);
+      try {
+        await _central.disconnect(e.peripheral);
+      } catch (_) {}
+    } finally {
+      _connecting.remove(id);
+    }
+  }
+
+  void _onCentralConnectionState(PeripheralConnectionStateChangedEventArgs e) {
+    if (e.state == ConnectionState.disconnected) {
+      final id = e.peripheral.uuid.toString();
+      if (_centralLinks.remove(id) != null) {
+        _log('peer $id disconnected (central role)');
+        _links.add(MeshLinkEvent(id, MeshLinkChange.disconnected));
+      }
+    }
+  }
+
+  static String _shortUuid(UUID uuid) {
+    final s = uuid.toString().replaceAll('-', '');
+    return s.length > 8 ? s.substring(0, 8) : s;
+  }
+
+  GATTCharacteristic? _findCharacteristic(List<GATTService> services) {
+    for (final service in services) {
+      if (service.uuid != _serviceUuid) continue;
+      for (final c in service.characteristics) {
+        if (c.uuid == _characteristicUuid) return c;
+      }
+    }
+    return null;
+  }
+
+  // Peripheral role
+
+  void _wirePeripheral() {
+    _subs.add(_peripheral.characteristicWriteRequested.listen((e) async {
+      if (e.characteristic.uuid == _characteristicUuid) {
+        _inbound.add(MeshInboundFrame(
+          data: Uint8List.fromList(e.request.value),
+          linkId: e.central.uuid.toString(),
+        ));
+      }
+      try {
+        await _peripheral.respondWriteRequest(e.request);
+      } catch (_) {}
+    }));
+    _subs.add(_peripheral.characteristicNotifyStateChanged.listen((e) {
+      if (e.characteristic.uuid != _characteristicUuid) return;
+      final id = e.central.uuid.toString();
+      if (e.state) {
+        final wasNew = !_subscribedCentrals.containsKey(id);
+        _subscribedCentrals[id] = e.central;
+        if (wasNew) {
+          _log('central $id subscribed (peripheral role) — '
+              '$connectedLinkCount link(s)');
+          _links.add(MeshLinkEvent(id, MeshLinkChange.connected));
+        }
+      } else {
+        if (_subscribedCentrals.remove(id) != null) {
+          _log('central $id unsubscribed (peripheral role)');
+          _links.add(MeshLinkEvent(id, MeshLinkChange.disconnected));
+        }
+      }
+    }));
+    // Android surfaces central connect/disconnect; other platforms throw.
+    try {
+      _subs.add(_peripheral.connectionStateChanged.listen((e) {
+        if (e.state == ConnectionState.disconnected) {
+          final id = e.central.uuid.toString();
+          if (_subscribedCentrals.remove(id) != null) {
+            _links.add(MeshLinkEvent(id, MeshLinkChange.disconnected));
+          }
+        }
+      }));
+    } catch (_) {
+      // connectionStateChanged is unsupported on this platform.
+    }
+  }
+
+  Future<void> _beginPeripheral() async {
+    if (_advertising || _peripheralStarting) return;
+    _peripheralStarting = true;
+    try {
+      await BluetoothNameRepair().run();
+      await _peripheral.removeAllServices();
+      final characteristic = GATTCharacteristic.mutable(
+        uuid: _characteristicUuid,
+        properties: [
+          GATTCharacteristicProperty.read,
+          GATTCharacteristicProperty.write,
+          GATTCharacteristicProperty.writeWithoutResponse,
+          GATTCharacteristicProperty.notify,
+        ],
+        permissions: [
+          GATTCharacteristicPermission.read,
+          GATTCharacteristicPermission.write,
+        ],
+        descriptors: [],
+      );
+      _localCharacteristic = characteristic;
+      await _peripheral.addService(GATTService(
+        uuid: _serviceUuid,
+        isPrimary: true,
+        includedServices: [],
+        characteristics: [characteristic],
+      ));
+      final advertisement = meshAdvertisement(
+        platform: defaultTargetPlatform,
+        peerID: _advertisedNameString,
+        serviceUuid: _serviceUuid,
+      );
+      await _peripheral.startAdvertising(advertisement);
+      _advertising = true;
+      _log(advertisement.name == null
+          ? 'advertising mesh service'
+          : 'advertising mesh service as "${advertisement.name}"');
+    } catch (e) {
+      _log('startAdvertising failed: $e');
+    } finally {
+      _peripheralStarting = false;
+    }
+  }
+
+  @override
+  Future<void> openSystemSettings() async {
+    try {
+      await _central.showAppSettings();
+    } catch (_) {
+      try {
+        await _peripheral.showAppSettings();
+      } catch (_) {}
+    }
+  }
+
+  MeshTransportAvailability _mapState(BluetoothLowEnergyState state) {
+    switch (state) {
+      case BluetoothLowEnergyState.poweredOn:
+        return MeshTransportAvailability.ready;
+      case BluetoothLowEnergyState.poweredOff:
+        return MeshTransportAvailability.poweredOff;
+      case BluetoothLowEnergyState.unauthorized:
+        return MeshTransportAvailability.unauthorized;
+      case BluetoothLowEnergyState.unsupported:
+        return MeshTransportAvailability.unsupported;
+      case BluetoothLowEnergyState.unknown:
+        return MeshTransportAvailability.unknown;
+    }
+  }
+}
+
+class _CentralLink {
+  _CentralLink(this.peripheral, this.characteristic);
+  final Peripheral peripheral;
+  final GATTCharacteristic characteristic;
+}

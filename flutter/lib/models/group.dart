@@ -1,0 +1,332 @@
+import '../features/group_tools/group_tools.dart';
+
+/// Group control-event types carried in a group rumor's `['type', …]` tag.
+class GroupControlType {
+  GroupControlType._();
+  static const message = 'group-message';
+  static const invite = 'group-invite';
+  static const addMember = 'group-add-member';
+  static const removeMember = 'group-remove-member';
+  static const promoteMod = 'group-promote-mod';
+  static const revokeMod = 'group-revoke-mod';
+  static const promoteAdmin = 'group-promote-admin';
+  static const revokeAdmin = 'group-revoke-admin';
+  static const rosterReq = 'group-roster-req';
+  static const roster = 'group-roster';
+  static const transferOwner = 'group-transfer-owner';
+  static const metadata = 'group-metadata';
+  static const deleteMessage = 'group-delete-message';
+  static const joinRequest = 'group-join-request';
+  static const leave = 'group-leave';
+  static const unban = 'group-unban';
+  static const keyResync = 'key-resync';
+  static const history = 'group-history';
+}
+
+class ModLogEntry {
+  ModLogEntry({
+    required this.type,
+    required this.actor,
+    this.target,
+    this.messageId,
+    required this.ts,
+  });
+
+  /// 'kick'|'ban'|'unban'|'promote'|'revoke'|'transfer'|'delete-message'
+  final String type;
+  final String actor;
+  final String? target;
+  final String? messageId;
+  final int ts;
+
+  Map<String, dynamic> toJson() => {
+        'type': type,
+        'actor': actor,
+        'target': target,
+        'messageId': messageId,
+        'ts': ts,
+      };
+
+  factory ModLogEntry.fromJson(Map<String, dynamic> j) => ModLogEntry(
+        type: j['type'] as String,
+        actor: j['actor'] as String,
+        target: j['target'] as String?,
+        messageId: j['messageId'] as String?,
+        ts: (j['ts'] as num).toInt(),
+      );
+}
+
+class Group {
+  Group({
+    required this.id,
+    this.name = '',
+    List<String>? members,
+    this.lastMessageTime = 0,
+    this.createdBy,
+    List<String>? mods,
+    List<String>? admins,
+    List<String>? banned,
+    this.avatar,
+    this.banner,
+    this.description,
+    this.allowMemberInvites = true,
+    this.inviteEnabled = false,
+    this.inviteEpoch = 0,
+    this.metaUpdatedAt = 0,
+    this.metaUpdatedBy,
+    this.metaBy,
+    List<String>? metaAdmins,
+    this.genesisOwner,
+    this.genesisNonce,
+    this.lastModTs = 0,
+    this.lastModEventId,
+    this.shareHistory = false,
+    this.historyReceived = false,
+    List<ModLogEntry>? modLog,
+    Map<String, int>? modTsByTarget,
+    List<String>? modSeenIds,
+    this.slowmode = 0,
+    this.slowmodeSince = 0,
+    this.joinApproval = false,
+    List<JoinRequest>? joinRequests,
+    Map<String, int>? memberAt,
+    Map<String, int>? memberRemovedAt,
+    this.joinedVia,
+  })  : joinRequests = joinRequests ?? <JoinRequest>[],
+        memberAt = memberAt ?? <String, int>{},
+        memberRemovedAt = memberRemovedAt ?? <String, int>{},
+        members = members ?? <String>[],
+        mods = mods ?? <String>[],
+        admins = admins ?? <String>[],
+        metaAdmins = metaAdmins ?? <String>[],
+        banned = banned ?? <String>[],
+        modLog = modLog ?? <ModLogEntry>[],
+        modTsByTarget = modTsByTarget ?? <String, int>{},
+        modSeenIds = modSeenIds ?? <String>[];
+
+  /// 64-hex CSPRNG group id.
+  final String id;
+  String name;
+  final List<String> members;
+  int lastMessageTime;
+  String? createdBy;
+  final List<String> mods;
+  final List<String> admins;
+  final List<String> banned;
+  String? avatar;
+  String? banner;
+  String? description;
+  bool allowMemberInvites;
+  bool inviteEnabled;
+  int inviteEpoch;
+  int metaUpdatedAt;
+
+  String? metaUpdatedBy;
+
+  Map<String, String>? metaBy;
+
+  List<String> metaAdmins;
+
+  String? genesisOwner;
+  String? genesisNonce;
+
+  int lastModTs;
+  String? lastModEventId;
+
+  /// Owner-controlled: newly added members receive recent chat history.
+  bool shareHistory;
+
+  /// One shared-history blob was already folded in for this group.
+  bool historyReceived;
+  final List<ModLogEntry> modLog;
+
+  /// Moderation clocks per target pubkey, so unrelated newer events don't drop an out-of-order one.
+  final Map<String, int> modTsByTarget;
+
+  /// Recently applied moderation event ids (x tag / wrap id) for replay dedup.
+  final List<String> modSeenIds;
+
+  int slowmode;
+  int slowmodeSince;
+  bool joinApproval;
+  List<JoinRequest> joinRequests;
+
+  final Map<String, int> memberAt;
+
+  final Map<String, int> memberRemovedAt;
+
+  String? joinedVia;
+
+  bool isOwner(String pubkey) => createdBy == pubkey;
+  bool isMod(String pubkey) => mods.contains(pubkey);
+  bool canModerate(String pubkey) => isOwner(pubkey) || isMod(pubkey);
+  bool canAddMembers(String pubkey) =>
+      isOwner(pubkey) || (members.contains(pubkey) && allowMemberInvites);
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'members': members,
+        'lastMessageTime': lastMessageTime,
+        'createdBy': createdBy,
+        'mods': mods,
+        'admins': admins,
+        'banned': banned,
+        'avatar': avatar,
+        'banner': banner,
+        'description': description,
+        'allowMemberInvites': allowMemberInvites,
+        'inviteEnabled': inviteEnabled,
+        'inviteEpoch': inviteEpoch,
+        'metaUpdatedAt': metaUpdatedAt,
+        'metaUpdatedBy': metaUpdatedBy,
+        if (metaBy != null) 'metaBy': metaBy,
+        if (metaAdmins.isNotEmpty) 'metaAdmins': metaAdmins,
+        'genesisOwner': genesisOwner,
+        'genesisNonce': genesisNonce,
+        'lastModTs': lastModTs,
+        'lastModEventId': lastModEventId,
+        'shareHistory': shareHistory,
+        'historyReceived': historyReceived,
+        'modTsByTarget': modTsByTarget,
+        'modSeenIds': modSeenIds,
+        'modLog': modLog.map((e) => e.toJson()).toList(),
+        if (slowmode > 0) 'slowmode': slowmode,
+        if (slowmode > 0) 'slowmodeSince': slowmodeSince,
+        if (joinApproval) 'joinApproval': true,
+        if (joinRequests.isNotEmpty)
+          'joinRequests': joinRequests.map((r) => r.toJson()).toList(),
+        if (memberAt.isNotEmpty) 'memberAt': memberAt,
+        if (memberRemovedAt.isNotEmpty) 'memberRemovedAt': memberRemovedAt,
+        if (joinedVia != null) 'joinedVia': joinedVia,
+      };
+
+  static const List<String> metaFields = [
+    'name',
+    'avatar',
+    'banner',
+    'description',
+  ];
+
+  static final RegExp _hexKey = RegExp(r'^[0-9a-fA-F]{64}$');
+
+  static List<String> parseKeyList(Object? v) {
+    if (v is! List) return <String>[];
+    final out = <String>[];
+    for (final pk in v) {
+      if (pk is String && _hexKey.hasMatch(pk) && !out.contains(pk)) out.add(pk);
+    }
+    return out;
+  }
+
+  static Map<String, String>? parseMetaBy(Object? v) {
+    if (v is! Map) return null;
+    final out = <String, String>{};
+    v.forEach((k, by) {
+      final key = k.toString();
+      if (metaFields.contains(key) && by is String && _hexKey.hasMatch(by)) {
+        out[key] = by;
+      }
+    });
+    return out;
+  }
+
+  static Map<String, int>? parseTimeMap(Object? v) {
+    if (v is! Map) return null;
+    final out = <String, int>{};
+    v.forEach((k, t) {
+      if (t is num && t.isFinite) out[k.toString()] = t < 0 ? 0 : t.toInt();
+    });
+    return out;
+  }
+
+  factory Group.fromJson(Map<String, dynamic> j) => Group(
+        id: j['id'] as String,
+        name: (j['name'] ?? '') as String,
+        members: ((j['members'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+        lastMessageTime: (j['lastMessageTime'] as num?)?.toInt() ?? 0,
+        createdBy: j['createdBy'] as String?,
+        mods: ((j['mods'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+        admins: ((j['admins'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+        banned: ((j['banned'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+        avatar: j['avatar'] as String?,
+        banner: j['banner'] as String?,
+        description: j['description'] as String?,
+        allowMemberInvites: j['allowMemberInvites'] != false,
+        inviteEnabled: j['inviteEnabled'] == true,
+        inviteEpoch: (j['inviteEpoch'] as num?)?.toInt() ?? 0,
+        metaUpdatedAt: (j['metaUpdatedAt'] as num?)?.toInt() ?? 0,
+        metaUpdatedBy: j['metaUpdatedBy'] as String?,
+        metaBy: parseMetaBy(j['metaBy']),
+        metaAdmins: parseKeyList(j['metaAdmins']),
+        genesisOwner: j['genesisOwner'] as String?,
+        genesisNonce: j['genesisNonce'] as String?,
+        lastModTs: (j['lastModTs'] as num?)?.toInt() ?? 0,
+        lastModEventId: j['lastModEventId'] as String?,
+        shareHistory: j['shareHistory'] == true,
+        historyReceived: j['historyReceived'] == true,
+        modTsByTarget: j['modTsByTarget'] is Map
+            ? (j['modTsByTarget'] as Map).map(
+                (k, v) => MapEntry(k.toString(), (v as num?)?.toInt() ?? 0))
+            : null,
+        modSeenIds: ((j['modSeenIds'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+        modLog: ((j['modLog'] as List?) ?? const [])
+            .map(
+                (e) => ModLogEntry.fromJson((e as Map).cast<String, dynamic>()))
+            .toList(),
+        slowmode: GroupTools.normalizeSlowmode(j['slowmode']),
+        slowmodeSince: (j['slowmodeSince'] as num?)?.toInt() ?? 0,
+        joinApproval: j['joinApproval'] == true,
+        joinRequests: [
+          for (final r in (j['joinRequests'] as List?) ?? const [])
+            if (JoinRequest.fromJson(r) != null) JoinRequest.fromJson(r)!,
+        ],
+        memberAt: parseTimeMap(j['memberAt']),
+        memberRemovedAt: parseTimeMap(j['memberRemovedAt']),
+        joinedVia: j['joinedVia'] is String ? j['joinedVia'] as String : null,
+      );
+}
+
+/// Invite-link token payload (base64url JSON).
+class GroupInviteToken {
+  GroupInviteToken({
+    this.v = 1,
+    required this.groupId,
+    required this.approver,
+    required this.epoch,
+    required this.name,
+    this.summary,
+  });
+
+  final InviteSignedSummary? summary;
+
+  InvitePayload toPayload() =>
+      InvitePayload(g: groupId, n: name, a: approver, e: epoch, s: summary);
+
+  final int v;
+  final String groupId; // 'g'
+  final String approver; // 'a'
+  final int epoch; // 'e'
+  final String name; // 'n'
+
+  Map<String, dynamic> toJson() =>
+      {'v': v, 'g': groupId, 'a': approver, 'e': epoch, 'n': name};
+
+  factory GroupInviteToken.fromJson(Map<String, dynamic> j) => GroupInviteToken(
+        v: (j['v'] as num?)?.toInt() ?? 1,
+        groupId: j['g'] as String,
+        approver: j['a'] as String,
+        epoch: (j['e'] as num?)?.toInt() ?? 0,
+        name: (j['n'] ?? '') as String,
+      );
+}

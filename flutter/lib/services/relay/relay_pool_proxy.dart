@@ -1,0 +1,2039 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+
+import 'package:flutter/foundation.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+
+import '../../core/constants/relays.dart';
+import '../../features/relays/relay_add.dart';
+import '../../features/relays/relay_block.dart';
+import 'proxy_down_rule.dart';
+import '../nostr/event_provenance.dart';
+import '../../models/nostr_event.dart';
+import '../api/api_config.dart';
+import 'held_publishes.dart';
+import 'live_sub_retry.dart';
+import 'relay_connection.dart'
+    show WebSocketChannelFactory, defaultRelayChannelFactory, relayClock;
+import 'relay_message.dart';
+import 'relay_pool.dart';
+import 'relay_stats.dart';
+
+/// One role-keyed shard: stable id, relay set and (for critical) DM relays, as `_shardRelaysByRole`.
+
+int utf8ByteLength(String s) {
+  var n = 0;
+  final len = s.length;
+  for (var i = 0; i < len; i++) {
+    final c = s.codeUnitAt(i);
+    if (c < 0x80) {
+      n += 1;
+    } else if (c < 0x800) {
+      n += 2;
+    } else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < len) {
+      final d = s.codeUnitAt(i + 1);
+      if (d >= 0xDC00 && d <= 0xDFFF) {
+        n += 4;
+        i++;
+      } else {
+        n += 3;
+      }
+    } else {
+      n += 3;
+    }
+  }
+  return n;
+}
+
+class RelayShard {
+  RelayShard({
+    required this.id,
+    required this.role,
+    required this.relays,
+    required this.dmRelays,
+  });
+
+  final String id;
+  final String role;
+  final List<String> relays;
+  final List<String> dmRelays;
+}
+
+/// Relays the PWA hard-blocks from any shard.
+const Set<String> _blockedRelays = {
+  'wss://relay.nosflare.com',
+  'wss://relay.nostraddress.com',
+  'wss://nostr-server-production.up.railway.app',
+};
+
+String canonicalRelayUrl(String url) => RelayBlock.canon(url);
+
+/// Port of `_shardRelaysByRole`: `app-0`, `critical-N`, `geo-N`, `discovered-N`, chunked at [chunkSize].
+List<RelayShard> shardRelaysByRole(
+  Iterable<String> allRelays,
+  Iterable<String> geoRelayUrls,
+  List<String> dmRelays, {
+  List<String> defaultRelays = RelayConfig.defaultRelays,
+  String appRelay = RelayConfig.appRelay,
+  Set<String> permanentBlacklist = const {},
+  Set<String> blocked = const {},
+  List<String> added = const [],
+  int chunkSize = RelayConfig.relaysPerWorker,
+}) {
+  bool isValid(String url) =>
+      url.startsWith('wss://') &&
+      !_blockedRelays.contains(url) &&
+      !permanentBlacklist.contains(url);
+
+  final geoSet = <String>{
+    for (final u in geoRelayUrls)
+      if (isValid(u)) u
+  };
+  final appValid = isValid(appRelay);
+
+  // Critical = default relays plus DM relays, excluding the app relay.
+  final critical = <String>[
+    for (final u in {...defaultRelays, ...dmRelays})
+      if (isValid(u) && u != appRelay) u
+  ];
+
+  final reservedSet = <String>{...critical};
+  if (appValid) reservedSet.add(appRelay);
+
+  final addedRelays = <String>[];
+  for (final u in added) {
+    if (!isValid(u) || reservedSet.contains(u)) continue;
+    reservedSet.add(u);
+    addedRelays.add(u);
+  }
+
+  // Geo = CSV relays not already reserved.
+  final geo = <String>[
+    for (final u in geoSet)
+      if (!reservedSet.contains(u)) u
+  ];
+
+  // Discovered = remaining relays, canonically deduped.
+  final geoForDiscovered = <String>{...geo};
+  final claimedCanon = <String>{
+    for (final u in reservedSet) canonicalRelayUrl(u),
+    for (final u in geoForDiscovered) canonicalRelayUrl(u),
+  };
+  final seenDiscoveredCanon = <String>{};
+  final discovered = <String>[];
+  for (final url in {...allRelays}) {
+    if (!isValid(url) ||
+        reservedSet.contains(url) ||
+        geoForDiscovered.contains(url)) {
+      continue;
+    }
+    final canon = canonicalRelayUrl(url);
+    if (claimedCanon.contains(canon) || seenDiscoveredCanon.contains(canon)) {
+      continue;
+    }
+    seenDiscoveredCanon.add(canon);
+    discovered.add(url);
+  }
+
+  List<List<String>> chunk(List<String> arr) {
+    final out = <List<String>>[];
+    for (var i = 0; i < arr.length; i += chunkSize) {
+      out.add(arr.sublist(i, min(i + chunkSize, arr.length)));
+    }
+    return out;
+  }
+
+  final shards = <RelayShard>[];
+
+  if (appValid) {
+    shards.add(RelayShard(
+        id: 'app-0',
+        role: 'critical',
+        relays: [appRelay],
+        dmRelays: [appRelay]));
+  }
+
+  final criticalDmRelays = <String>[
+    for (final u in dmRelays)
+      if (isValid(u) && u != appRelay) u
+  ];
+  final criticalChunks = chunk(critical);
+  for (var i = 0; i < criticalChunks.length; i++) {
+    shards.add(RelayShard(
+      id: 'critical-$i',
+      role: 'critical',
+      relays: criticalChunks[i],
+      dmRelays: i == 0 ? criticalDmRelays : const [],
+    ));
+  }
+
+  final addedChunks = chunk(addedRelays);
+  for (var i = 0; i < addedChunks.length; i++) {
+    shards.add(RelayShard(
+        id: 'added-$i',
+        role: 'added',
+        relays: addedChunks[i],
+        dmRelays: [...addedChunks[i]]));
+  }
+
+  final geoChunks = chunk(geo);
+  for (var i = 0; i < geoChunks.length; i++) {
+    shards.add(RelayShard(
+        id: 'geo-$i', role: 'geo', relays: geoChunks[i], dmRelays: const []));
+  }
+
+  final discoveredChunks = chunk(discovered);
+  for (var i = 0; i < discoveredChunks.length; i++) {
+    shards.add(RelayShard(
+        id: 'discovered-$i',
+        role: 'discovered',
+        relays: discoveredChunks[i],
+        dmRelays: const []));
+  }
+
+  final kept = RelayBlock.filterShards<RelayShard>(
+    shards,
+    RelayBlock.toSet(blocked),
+    relaysOf: (s) => s.relays,
+    dmRelaysOf: (s) => s.dmRelays,
+    rebuild: (s, relays, dmRelays) => RelayShard(
+        id: s.id, role: s.role, relays: relays, dmRelays: dmRelays),
+  );
+  if (kept.isEmpty) {
+    return [
+      RelayShard(
+          id: 'critical-0',
+          role: 'critical',
+          relays: const [],
+          dmRelays: const [])
+    ];
+  }
+  return kept;
+}
+
+/// Wrapped outbound frames for the `/api/relay-pool` socket.
+class PoolFrame {
+  PoolFrame._();
+
+  /// `["RELAYS",{relays,dmRelays}]`
+  static String relays(List<String> relays, List<String> dmRelays) =>
+      jsonEncode(<dynamic>[
+        'RELAYS',
+        {'relays': relays, 'dmRelays': dmRelays}
+      ]);
+
+  /// `["EVENT",e]`
+  static String event(NostrEvent e) =>
+      jsonEncode(<dynamic>['EVENT', e.toJson()]);
+
+  /// `["GEO_EVENT",e,[urls]]`
+  static String geoEvent(NostrEvent e, List<String> urls) =>
+      jsonEncode(<dynamic>['GEO_EVENT', e.toJson(), urls]);
+
+  /// `["DM_EVENT",e]`
+  static String dmEvent(NostrEvent e) =>
+      jsonEncode(<dynamic>['DM_EVENT', e.toJson()]);
+
+  /// `["REQ",subId,...filters]`
+  static String req(String subId, List<NostrFilter> filters) =>
+      jsonEncode(<dynamic>['REQ', subId, ...filters.map((f) => f.toJson())]);
+
+  /// `["CLOSE",subId]`
+  static String close(String subId) => jsonEncode(<dynamic>['CLOSE', subId]);
+
+  /// `["KIND_BLACKLIST",{url:[kinds]}]` so the worker skips a relay for kinds it rejected.
+  static String kindBlacklist(Map<String, Set<int>> config) =>
+      jsonEncode(<dynamic>[
+        'KIND_BLACKLIST',
+        {for (final e in config.entries) e.key: e.value.toList()},
+      ]);
+}
+
+/// Inbound wrapped pool frame; EVENT carries subId first, and OK/EOSE may carry a trailing relay url.
+sealed class PoolMessage {
+  const PoolMessage();
+
+  static PoolMessage? parse(String raw) {
+    final dynamic decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } catch (_) {
+      return null;
+    }
+    if (decoded is! List || decoded.isEmpty) return null;
+    return fromList(decoded);
+  }
+
+  static PoolMessage? fromList(List<dynamic> arr) {
+    if (arr.isEmpty || arr[0] is! String) return null;
+    final type = arr[0] as String;
+    switch (type) {
+      case 'EVENT':
+        // ["EVENT", subId, event, sourceRelay?]
+        if (arr.length < 3) return null;
+        final subId = arr[1]?.toString() ?? '';
+        final ev = arr[2];
+        if (ev is! Map) return null;
+        final sourceRelay = arr.length > 3 ? arr[3]?.toString() : null;
+        return PoolEvent(
+          subId,
+          NostrEvent.fromJson(Map<String, dynamic>.from(ev)),
+          sourceRelay,
+        );
+      case 'OK':
+        // ["OK", id, accepted, reason, relayUrl?], the url being the proxy's attribution.
+        if (arr.length < 3) return null;
+        return PoolOk(
+          arr[1]?.toString() ?? '',
+          arr[2] == true,
+          arr.length > 3 ? (arr[3]?.toString() ?? '') : '',
+          arr.length > 4 ? arr[4]?.toString() : null,
+        );
+      case 'EOSE':
+        // ["EOSE", subId]
+        if (arr.length < 2) return null;
+        return PoolEose(arr[1]?.toString() ?? '');
+      case 'CLOSED':
+        // ["CLOSED", subId, reason, relayUrl?]
+        if (arr.length < 2) return null;
+        return PoolClosed(
+          arr[1]?.toString() ?? '',
+          arr.length > 2 ? (arr[2]?.toString() ?? '') : '',
+          arr.length > 3 ? arr[3]?.toString() : null,
+        );
+      case 'NOTICE':
+        return PoolNotice(
+          arr.length > 1 ? (arr[1]?.toString() ?? '') : '',
+          arr.length > 2 ? arr[2]?.toString() : null,
+        );
+      case 'POOL:PING':
+        // ["POOL:PING", ts]: keepalive; ts is ignored.
+        return const PoolPing();
+      case 'POOL:STATUS':
+        // ["POOL:STATUS", {connected:[urls], latency:{url:ms}}]
+        final status = arr.length > 1 && arr[1] is Map
+            ? Map<String, dynamic>.from(arr[1] as Map)
+            : const <String, dynamic>{};
+        final connected = (status['connected'] is List)
+            ? (status['connected'] as List).map((e) => e.toString()).toList()
+            : const <String>[];
+        // Per-relay latency from this worker, for the Network Stats rows in proxy mode.
+        final latency = <String, int>{};
+        final rawLat = status['latency'];
+        if (rawLat is Map) {
+          rawLat.forEach((k, v) {
+            final ms = v is num ? v.round() : int.tryParse('$v');
+            if (ms != null) latency[k.toString()] = ms;
+          });
+        }
+        return PoolStatus(connected, latency);
+      case 'POOL:SEEN':
+        if (arr.length < 3) return null;
+        final seenId = arr[1]?.toString() ?? '';
+        final seenRelay = arr[2]?.toString() ?? '';
+        if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(seenId)) return null;
+        if (!seenRelay.startsWith('wss://')) return null;
+        return PoolSeen(seenId, seenRelay);
+      case 'POOL:RETRACT':
+        final retractId = arr.length > 1 ? arr[1]?.toString() ?? '' : '';
+        if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(retractId)) return null;
+        return PoolRetract(retractId, arr.length > 2 ? arr[2]?.toString() : null);
+      case 'POOL:RELAY_BAN':
+        // ["POOL:RELAY_BAN", relayUrl, reason?]: the proxy permanently dropped this relay.
+        final url = arr.length > 1 ? arr[1]?.toString() ?? '' : '';
+        if (!url.startsWith('wss://')) return null;
+        final reason =
+            arr.length > 2 ? arr[2]?.toString() ?? 'banned' : 'banned';
+        return PoolRelayBan(url, reason);
+      default:
+        // POOL:SHARDS / NOTICE / AUTH are unhandled here.
+        return null;
+    }
+  }
+}
+
+class PoolEvent extends PoolMessage {
+  const PoolEvent(this.subId, this.event, this.sourceRelay);
+  final String subId;
+  final NostrEvent event;
+  final String? sourceRelay;
+}
+
+bool isRateLimitRejection(String reason) =>
+    RegExp(r'rate-?limit|too many|slow down', caseSensitive: false)
+        .hasMatch(reason);
+
+class PoolOk extends PoolMessage {
+  const PoolOk(this.id, this.accepted, this.message, [this.relayUrl]);
+  final String id;
+  final bool accepted;
+  final String message;
+
+  /// The proxy's per-relay attribution (`wss://…`), when present.
+  final String? relayUrl;
+}
+
+class PoolEose extends PoolMessage {
+  const PoolEose(this.subId);
+  final String subId;
+}
+
+class PoolClosed extends PoolMessage {
+  const PoolClosed(this.subId, [this.reason = '', this.relayUrl]);
+  final String subId;
+  final String reason;
+
+  /// The proxy's per-relay attribution (`wss://…`), when present.
+  final String? relayUrl;
+}
+
+class PoolNotice extends PoolMessage {
+  const PoolNotice(this.reason, [this.relayUrl]);
+  final String reason;
+  final String? relayUrl;
+}
+
+class PoolPing extends PoolMessage {
+  const PoolPing();
+}
+
+class PoolStatus extends PoolMessage {
+  const PoolStatus(this.connected, [this.latency = const {}]);
+  final List<String> connected;
+
+  /// Per-relay latency in ms from POOL:STATUS.
+  final Map<String, int> latency;
+}
+
+class PoolRelayBan extends PoolMessage {
+  const PoolRelayBan(this.url, this.reason);
+  final String url;
+  final String reason;
+}
+
+class PoolSeen extends PoolMessage {
+  const PoolSeen(this.eventId, this.relayUrl);
+  final String eventId;
+  final String relayUrl;
+}
+
+class PoolRetract extends PoolMessage {
+  const PoolRetract(this.eventId, this.reason);
+  final String eventId;
+  final String? reason;
+}
+
+const int kReconnectQuickMaxMs = 250;
+
+const int kReconnectQuickAfterOpenMs = 2000;
+
+bool reconnectQuick(int? openMs) =>
+    openMs != null && openMs >= kReconnectQuickAfterOpenMs;
+
+int shardReconnectDelayMs(int step, double rand) {
+  if (step < 0) return (rand * kReconnectQuickMaxMs).floor();
+  final base = min(3000 * pow(1.7, step), 60000).toDouble();
+  return (base * (0.7 + rand * 0.3)).floor();
+}
+
+/// One shard's `/api/relay-pool` socket; reconnect backoff min(3000*1.7^n, 60000) with 0.7–1.0 jitter.
+class _ShardSocket {
+  _ShardSocket({
+    required this.shard,
+    required this.url,
+    required this.channelFactory,
+    required this.rng,
+    required this.stats,
+    required this.onMessage,
+    required this.onConnected,
+    required this.onClosed,
+    this.onLost,
+    this.onLinked,
+    this.onFirstFrame,
+    this.reqFilter,
+    this.confirmTimeout = const Duration(seconds: 12),
+    DateTime Function()? now,
+  }) : _now = now ?? relayClock;
+
+  static const Duration freshCheck = Duration(seconds: 3);
+  static const int unackedMax = 200;
+  static const Duration unackedTtl = Duration(seconds: 60);
+
+  WebSocketChannel? _next;
+  StreamSubscription<dynamic>? _nextSub;
+  DateTime? _nextAt;
+  Timer? _nextTimer;
+  bool _nextSeen = false;
+  List<String> _nextRelays = const [];
+  DateTime? _heardAt;
+  bool _adopted = false;
+  final Map<String, (String, DateTime)> _unacked = {};
+
+  bool get refreshing => _next != null;
+
+  bool get _heardSinceFresh {
+    final h = _heardAt;
+    final n = _nextAt;
+    return h != null && n != null && !h.isBefore(n);
+  }
+
+  final String? Function(String frame)? reqFilter;
+
+  final void Function(_ShardSocket sock, DateTime? lastLiveAt)? onLost;
+
+  final void Function(_ShardSocket sock)? onLinked;
+
+  final void Function(_ShardSocket sock)? onFirstFrame;
+
+  Object? _closeError;
+
+  bool lastCloseFailed = false;
+
+  bool lastCloseRateLimited = false;
+
+  bool linked = false;
+
+  DateTime? openedAt;
+
+  DateTime? upstreamAt;
+
+  DateTime? healthyAt;
+
+  ({String id, DateTime at, Duration limit})? probe;
+
+  DateTime? _lostAtOverride;
+
+  DateTime get lastActiveAt {
+    final opened = openedAt;
+    final up = upstreamAt;
+    if (up == null) return opened ?? _now();
+    if (opened == null) return up;
+    return up.isAfter(opened) ? up : opened;
+  }
+
+  void recycle({DateTime? lastLiveAt}) {
+    if (_closedByUser || !_open) return;
+    _lostAtOverride = lastLiveAt;
+    _sub?.cancel();
+    _sub = null;
+    try {
+      _channel?.sink.close();
+    } catch (_) {}
+    _onDone();
+  }
+
+  RelayShard shard;
+  final DateTime Function() _now;
+  final String url;
+  final WebSocketChannelFactory channelFactory;
+  final Random rng;
+  final Duration confirmTimeout;
+
+  /// Shared pool counters this shard adds its frame byte lengths to.
+  final RelayStats stats;
+  final void Function(_ShardSocket sock, PoolMessage msg) onMessage;
+  final void Function(_ShardSocket sock) onConnected;
+  final void Function(_ShardSocket sock) onClosed;
+
+  WebSocketChannel? _channel;
+  StreamSubscription<dynamic>? _sub;
+  Timer? _reconnectTimer;
+  Timer? _confirmTimer;
+  int _reconnectAttempt = 0;
+  bool _closedByUser = false;
+  bool _open = false;
+  bool _settled = true;
+  bool _frameSinceConnect = false;
+
+  int failuresSinceFrame = 0;
+  DateTime? failureStreakStartedAt;
+
+  bool get hasFrameSinceConnect => _frameSinceConnect;
+
+  /// Closes before the pool ever confirmed; drives the host-unreachable fallback. Reset on confirm.
+  int failuresBeforeConfirm = 0;
+
+  /// True once a confirming inbound frame arrived, i.e. the proxy is reachable.
+  bool confirmed = false;
+
+  /// Relays this shard's proxy reports as connected (from POOL:STATUS).
+  List<String> connectedRelays = const [];
+
+  bool get isOpen => _open;
+
+  bool get isHeld => _held;
+
+  void connect() {
+    _closedByUser = false;
+    if (_open) return;
+    _open = false;
+    _settled = false;
+    _frameSinceConnect = false;
+    openedAt = _now();
+    upstreamAt = null;
+    healthyAt = null;
+    probe = null;
+    _lostAtOverride = null;
+    _closeError = null;
+    try {
+      final ch = channelFactory(Uri.parse(url));
+      _channel = ch;
+      linked = false;
+      try {
+        unawaited(ch.ready.then((_) {
+          if (!identical(_channel, ch) || !_open || linked) return;
+          linked = true;
+          onLinked?.call(this);
+        }, onError: (Object _) {}));
+      } catch (_) {}
+      _sub = _listen(ch);
+      // Treat listen as open and push RELAYS; backoff resets only on a real inbound frame.
+      _open = true;
+      _armConfirmTimer();
+      send(PoolFrame.relays(shard.relays, shard.dmRelays));
+      onConnected(this);
+    } catch (e) {
+      debugPrint('[RelayPoolProxy] Failed to open shard socket ($url): $e');
+      _closeError = e;
+      _onDone();
+    }
+  }
+
+  StreamSubscription<dynamic> _listen(WebSocketChannel ch) => ch.stream.listen(
+        (dynamic d) => _onChannelData(ch, d),
+        onError: (Object e) => _onChannelDone(ch, e),
+        onDone: () => _onChannelDone(ch, null),
+        cancelOnError: false,
+      );
+
+  void _onChannelData(WebSocketChannel ch, dynamic data) {
+    if (identical(ch, _next)) {
+      _onNextData(data);
+    } else if (identical(ch, _channel)) {
+      _onData(data);
+    }
+  }
+
+  void _onChannelDone(WebSocketChannel ch, Object? error) {
+    if (identical(ch, _next)) {
+      _dropNext();
+    } else if (identical(ch, _channel)) {
+      if (error != null) _closeError = error;
+      _onDone();
+    }
+  }
+
+  static bool _lifts(PoolMessage msg) =>
+      !(msg is PoolPing ||
+          msg is PoolNotice ||
+          (msg is PoolStatus && msg.connected.isEmpty));
+
+  void _onNextData(dynamic data) {
+    final msg = data is String ? PoolMessage.parse(data) : null;
+    if (msg != null && _lifts(msg)) {
+      _promote();
+      _onData(data);
+      return;
+    }
+    if (data is String) {
+      stats.bytesReceived += utf8ByteLength(data);
+    } else if (data is List<int>) {
+      stats.bytesReceived += data.length;
+    }
+    if (msg == null) return;
+    _nextSeen = true;
+    if (msg is PoolStatus) {
+      _nextRelays = msg.connected;
+    } else if (msg is PoolNotice) {
+      onMessage(this, msg);
+    }
+  }
+
+  bool refresh() {
+    if (_closedByUser || _held || !_open || !_frameSinceConnect) return false;
+    final at = _nextAt;
+    if (_next != null && at != null && _now().difference(at) < freshCheck) {
+      return false;
+    }
+    _dropNext();
+    final WebSocketChannel ch;
+    try {
+      ch = channelFactory(Uri.parse(url));
+      _next = ch;
+      _nextAt = _now();
+      _nextSub = _listen(ch);
+    } catch (_) {
+      _dropNext();
+      return false;
+    }
+    _sendOn(ch, PoolFrame.relays(shard.relays, shard.dmRelays));
+    _nextTimer = Timer(freshCheck, () => _checkNext(ch));
+    return true;
+  }
+
+  void _checkNext(WebSocketChannel ch) {
+    if (!identical(ch, _next)) return;
+    _nextTimer = null;
+    if (!_heardSinceFresh) {
+      recycle();
+      return;
+    }
+    _nextTimer = Timer(confirmTimeout, () {
+      if (identical(ch, _next)) _dropNext();
+    });
+  }
+
+  void _promote() {
+    final ch = _next;
+    if (ch == null) return;
+    final oldSub = _sub;
+    final oldCh = _channel;
+    final alive = _heardSinceFresh;
+    final lastLiveAt = upstreamAt ?? openedAt;
+    _nextTimer?.cancel();
+    _nextTimer = null;
+    _channel = ch;
+    _sub = _nextSub;
+    _next = null;
+    _nextSub = null;
+    openedAt = _nextAt ?? _now();
+    _nextAt = null;
+    probe = null;
+    linked = true;
+    _frameSinceConnect = false;
+    if (_nextRelays.isNotEmpty) connectedRelays = _nextRelays;
+    _nextRelays = const [];
+    _nextSeen = false;
+    unawaited(oldSub?.cancel());
+    try {
+      oldCh?.sink.close();
+    } catch (_) {}
+    if (!alive) onLost?.call(this, lastLiveAt);
+    onLinked?.call(this);
+  }
+
+  bool _takeNext() {
+    final ch = _next;
+    if (ch == null) return false;
+    if (_held) {
+      _dropNext();
+      return false;
+    }
+    _nextTimer?.cancel();
+    _nextTimer = null;
+    _channel = ch;
+    _sub = _nextSub;
+    _next = null;
+    _nextSub = null;
+    openedAt = _nextAt ?? _now();
+    _nextAt = null;
+    _open = true;
+    _settled = false;
+    upstreamAt = null;
+    healthyAt = null;
+    probe = null;
+    connectedRelays = _nextRelays;
+    _nextRelays = const [];
+    final seen = _nextSeen;
+    _nextSeen = false;
+    _adopted = !seen;
+    _frameSinceConnect = seen;
+    linked = seen;
+    if (seen) {
+      onFirstFrame?.call(this);
+    } else {
+      _armConfirmTimer();
+    }
+    return true;
+  }
+
+  void _dropNext() {
+    final ch = _next;
+    final sub = _nextSub;
+    _nextTimer?.cancel();
+    _nextTimer = null;
+    _next = null;
+    _nextSub = null;
+    _nextAt = null;
+    _nextSeen = false;
+    _nextRelays = const [];
+    unawaited(sub?.cancel());
+    if (ch == null) return;
+    try {
+      ch.sink.close();
+    } catch (_) {}
+  }
+
+  void noteSent(String id, String frame) {
+    _unacked.remove(id);
+    _unacked[id] = (frame, _now());
+    while (_unacked.length > unackedMax) {
+      _unacked.remove(_unacked.keys.first);
+    }
+  }
+
+  void resendUnacked({bool next = false}) {
+    if (_unacked.isEmpty) return;
+    final now = _now();
+    _unacked.removeWhere((_, v) => now.difference(v.$2) > unackedTtl);
+    for (final v in _unacked.values.toList()) {
+      if (next) {
+        sendNext(v.$1);
+      } else {
+        sendCurrent(v.$1);
+      }
+    }
+  }
+
+  void _armConfirmTimer() {
+    _confirmTimer?.cancel();
+    _confirmTimer = Timer(confirmTimeout, () {
+      _confirmTimer = null;
+      if (_closedByUser || !_open || _frameSinceConnect) return;
+      _sub?.cancel();
+      _sub = null;
+      try {
+        _channel?.sink.close();
+      } catch (_) {}
+      _onDone();
+    });
+  }
+
+  void _onData(dynamic data) {
+    // Count inbound UTF-8 byte length, as the PWA's relayStats does.
+    if (data is String) {
+      stats.bytesReceived += utf8ByteLength(data);
+    } else if (data is List<int>) {
+      stats.bytesReceived += data.length;
+    }
+    if (data is! String) return;
+    final msg = PoolMessage.parse(data);
+    if (msg == null) return;
+    _heardAt = _now();
+    if (msg is PoolOk) _unacked.remove(msg.id);
+    // A real inbound frame proves the connection, so reset the backoff.
+    _reconnectAttempt = 0;
+    final first = !_frameSinceConnect;
+    _frameSinceConnect = true;
+    _adopted = false;
+    if (first) onFirstFrame?.call(this);
+    failuresSinceFrame = 0;
+    failureStreakStartedAt = null;
+    _confirmTimer?.cancel();
+    _confirmTimer = null;
+    // A parseable frame confirms the proxy, so later blips are normal reconnects, not a fallback.
+    if (!confirmed) {
+      confirmed = true;
+      failuresBeforeConfirm = 0;
+    }
+    if (msg is PoolStatus) {
+      connectedRelays = msg.connected;
+      if (msg.connected.isNotEmpty) healthyAt = _now();
+    }
+    if (msg is PoolEvent || msg is PoolEose || msg is PoolOk) {
+      upstreamAt = _now();
+    }
+    onMessage(this, msg);
+  }
+
+  void _onDone() {
+    if (_settled) return;
+    _settled = true;
+    _open = false;
+    final wasLive = _frameSinceConnect;
+    final opened = openedAt;
+    final openMs = wasLive && opened != null
+        ? _now().difference(opened).inMilliseconds
+        : null;
+    final lastLiveAt = _lostAtOverride ?? upstreamAt ?? openedAt;
+    _lostAtOverride = null;
+    probe = null;
+    // A close before confirming is an outright connect failure; count the streak.
+    if (!confirmed) failuresBeforeConfirm++;
+    if (!_frameSinceConnect) {
+      if (failuresSinceFrame == 0) failureStreakStartedAt = _now();
+      failuresSinceFrame++;
+    }
+    connectedRelays = const [];
+    linked = false;
+    lastCloseFailed = !_frameSinceConnect && !_closedByUser;
+    lastCloseRateLimited =
+        proxyCloseNamesRateLimit(_closeError, reason: _channel?.closeReason);
+    _closeError = null;
+    if (lastCloseRateLimited && _reconnectAttempt < 4) _reconnectAttempt = 4;
+    _cleanup();
+    onClosed(this);
+    if (wasLive && !_closedByUser) onLost?.call(this, lastLiveAt);
+    if (_closedByUser) return;
+    final adopted = _adopted;
+    _adopted = false;
+    if (_takeNext()) return;
+    _scheduleReconnect(quick: reconnectQuick(openMs) || adopted);
+  }
+
+  void _cleanup() {
+    _confirmTimer?.cancel();
+    _confirmTimer = null;
+    _sub?.cancel();
+    _sub = null;
+    _channel = null;
+  }
+
+  bool _held = false;
+
+  void hold() {
+    _held = true;
+    _dropNext();
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+  }
+
+  void unhold() => _held = false;
+
+  void _scheduleReconnect({bool quick = false}) {
+    if (_closedByUser || _held) return;
+    _reconnectTimer?.cancel();
+    final delayMs =
+        shardReconnectDelayMs(quick ? -1 : _reconnectAttempt, rng.nextDouble());
+    if (!quick) _reconnectAttempt++;
+    _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
+      if (_closedByUser || _held) return;
+      connect();
+    });
+  }
+
+  void reconnectNow() {
+    if (_closedByUser || _held || _open) return;
+    _reconnectAttempt = 0;
+    _scheduleReconnect(quick: true);
+  }
+
+  void retryNow() {
+    if (_closedByUser || _held || _open) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    connect();
+  }
+
+  void forgetFailures() {
+    _reconnectAttempt = 0;
+    failuresSinceFrame = 0;
+    failureStreakStartedAt = null;
+  }
+
+  bool send(String frame) {
+    if (!_open) return false;
+    final ok = _sendOn(_channel, frame);
+    if (_next != null) _sendOn(_next, frame);
+    return ok;
+  }
+
+  bool sendNext(String frame) => _next != null && _sendOn(_next, frame);
+
+  bool sendCurrent(String frame) => _open && _sendOn(_channel, frame);
+
+  bool _sendOn(WebSocketChannel? ch, String frame) {
+    if (ch == null) return false;
+    var out = frame;
+    final filter = reqFilter;
+    if (filter != null && shard.role == 'added') {
+      final f = filter(frame);
+      if (f == null) return frame.startsWith('["REQ"');
+      out = f;
+    }
+    try {
+      ch.sink.add(out);
+      stats.bytesSent += utf8ByteLength(out);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> close() async {
+    _closedByUser = true;
+    _open = false;
+    _settled = true;
+    _dropNext();
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _confirmTimer?.cancel();
+    _confirmTimer = null;
+    await _sub?.cancel();
+    _sub = null;
+    try {
+      await _channel?.sink.close();
+    } catch (_) {}
+    _channel = null;
+  }
+}
+
+/// Relay-pool proxy transport: [RelayPool]'s surface over `wss://<host>/api/relay-pool`, one socket per shard.
+class RelayPoolProxy implements PoolTransport {
+  RelayPoolProxy({
+    required List<String> relays,
+    EventVerifier? verify,
+    List<String>? geoRelayUrls,
+    List<String>? dmRelays,
+    Set<String>? permanentBlacklist,
+    Iterable<String>? blockedRelays,
+    String? poolUrl,
+    WebSocketChannelFactory? channelFactory,
+    Random? random,
+    this.onProxyUnreachable,
+    this.onProxyConnected,
+    this.onShardLost,
+    this.onShardReconnected,
+    this.confirmTimeout = const Duration(seconds: 12),
+    DateTime Function()? now,
+    this.eoseQuorum = 0.6,
+    this.eoseTimeout = const Duration(seconds: 4),
+    Duration heldWait = const Duration(seconds: 15),
+  })  : _verify = verify ?? ((_) async => true),
+        _held = HeldPublishes(max: heldMax, wait: heldWait),
+        _now = now ?? relayClock,
+        _allRelays = {...relays},
+        _geoRelayUrls = [...?geoRelayUrls],
+        _dmRelays = dmRelays ?? RelayConfig.defaultRelays,
+        _permanentBlacklist = {...?permanentBlacklist},
+        _blocked = RelayBlock.toSet(blockedRelays),
+        _poolUrl = poolUrl ?? ApiConfig.relayPoolUrl(),
+        _channelFactory = channelFactory ?? defaultRelayChannelFactory,
+        _rng = random ?? Random();
+
+  static const int heldMax = 16;
+
+  final EventVerifier _verify;
+  final HeldPublishes<PoolTransport> _held;
+  final Set<String> _allRelays;
+  final List<String> _geoRelayUrls;
+  final List<String> _dmRelays;
+  final Set<String> _permanentBlacklist;
+  Set<String> _blocked;
+  final String _poolUrl;
+  final WebSocketChannelFactory _channelFactory;
+  final Random _rng;
+
+  final double eoseQuorum;
+  final Duration eoseTimeout;
+
+  void Function()? onProxyUnreachable;
+
+  /// Fires once when a shard first confirms the proxy, for background-restore promotion.
+  void Function()? onProxyConnected;
+
+  void Function(String eventId)? onEventRetracted;
+
+  void Function(int units)? onPublishCharge;
+
+  void Function(String eventId)? onPublishRateLimited;
+
+  void Function(String eventId)? onPublishAccepted;
+
+  void Function(String eventId, bool accepted, String message, String? relayUrl)?
+      onPublishResult;
+
+  void Function(DateTime? lastLiveAt)? onShardLost;
+
+  void Function()? onShardReconnected;
+
+  void Function()? onConnectedChanged;
+
+  int _notedCount = 0;
+  bool _notedLinked = false;
+
+  bool get linked => _sockets.any((s) => s.isOpen && s.linked);
+
+  void _noteCount() {
+    if (_disposed) return;
+    if (_liveWaiters.isNotEmpty && freshLive) _releaseLiveWaiters();
+    final n = connectedCount;
+    final l = linked;
+    if (n == _notedCount && l == _notedLinked) return;
+    _notedCount = n;
+    _notedLinked = l;
+    onConnectedChanged?.call();
+  }
+
+  void reconnectDownShards() {
+    if (_disposed) return;
+    for (final sock in _sockets) {
+      sock.reconnectNow();
+    }
+  }
+
+  static const Duration probeQuiet = Duration(seconds: 60);
+  static const Duration probeTimeout = Duration(seconds: 10);
+  static const Duration probeBackoffMax = Duration(minutes: 10);
+  static const Duration healthInterval = Duration(seconds: 15);
+  static const Duration zombieAfter = Duration(seconds: 45);
+  static const Duration resumeFresh = Duration(seconds: 5);
+  static const Duration resumeProbeTimeout = Duration(seconds: 3);
+
+  static Duration probeQuietFor(int fails) {
+    final ms = probeQuiet.inMilliseconds * pow(2, min(fails, 16)).toInt();
+    return ms >= probeBackoffMax.inMilliseconds
+        ? probeBackoffMax
+        : Duration(milliseconds: ms);
+  }
+
+  final Map<String, int> _probeFails = {};
+
+  final Set<String> _lostShards = {};
+
+  Timer? _healthTimer;
+
+  Timer? _probeCheckTimer;
+
+  bool _livenessHeld = false;
+
+  void holdLiveness() {
+    _livenessHeld = true;
+    _stopLiveness();
+    for (final sock in _sockets) {
+      sock.hold();
+    }
+  }
+
+  void _startHealthCheck() {
+    if (_healthTimer != null || _livenessHeld) return;
+    _healthTimer = Timer.periodic(healthInterval, (_) => _checkShardHealth());
+  }
+
+  void _stopLiveness() {
+    _healthTimer?.cancel();
+    _healthTimer = null;
+    _probeCheckTimer?.cancel();
+    _probeCheckTimer = null;
+  }
+
+  void _checkShardHealth() {
+    if (_disposed || _livenessHeld) return;
+    final now = _now();
+    for (final sock in _sockets.toList()) {
+      if (!sock.isOpen || sock.shard.relays.isEmpty) continue;
+      if (sock.connectedRelays.isNotEmpty) {
+        sock.healthyAt = now;
+      } else {
+        final healthyAt = sock.healthyAt;
+        if (healthyAt != null && now.difference(healthyAt) > zombieAfter) {
+          sock.recycle(lastLiveAt: healthyAt);
+          continue;
+        }
+      }
+      if (_shardDeaf(sock, now)) sock.recycle();
+    }
+  }
+
+  bool _shardDeaf(_ShardSocket sock, DateTime now) {
+    final probe = sock.probe;
+    final id = sock.shard.id;
+    if (probe != null) {
+      if (now.difference(probe.at) < probe.limit) return false;
+      sock.probe = null;
+      _probeFails[id] = (_probeFails[id] ?? 0) + 1;
+      return true;
+    }
+    final quiet = probeQuietFor(_probeFails[id] ?? 0);
+    if (now.difference(sock.lastActiveAt) < quiet) return false;
+    _sendProbe(sock, now);
+    return false;
+  }
+
+  void _sendProbe(_ShardSocket sock, DateTime now,
+      {Duration limit = probeTimeout, bool currentOnly = false}) {
+    final hex = StringBuffer();
+    for (var i = 0; i < 32; i++) {
+      hex.write(_rng.nextInt(256).toRadixString(16).padLeft(2, '0'));
+    }
+    final target = hex.toString();
+    final id = 'nym-live-${target.substring(0, 12)}';
+    sock.probe = (id: id, at: now, limit: limit);
+    final frame = jsonEncode(<dynamic>[
+      'REQ',
+      id,
+      {
+        'ids': [target],
+        'limit': 1,
+      },
+    ]);
+    if (currentOnly) {
+      sock.sendCurrent(frame);
+    } else {
+      sock.send(frame);
+    }
+  }
+
+  void retryDownShards() {
+    if (_disposed || _livenessHeld) return;
+    for (final sock in _sockets.toList()) {
+      sock.retryNow();
+    }
+  }
+
+  void wake() {
+    if (_disposed || _livenessHeld) return;
+    final now = _now();
+    for (final sock in _sockets.toList()) {
+      sock.forgetFailures();
+      final opened = sock.openedAt;
+      if (sock.isOpen &&
+          !sock.hasFrameSinceConnect &&
+          opened != null &&
+          now.difference(opened) >= resumeProbeTimeout) {
+        sock.recycle();
+      }
+    }
+    retryDownShards();
+    for (final sock in _sockets.toList()) {
+      if (!sock.refresh()) continue;
+      if (sock.probe == null) {
+        _sendProbe(sock, now, limit: resumeProbeTimeout, currentOnly: true);
+      }
+      _onShardFresh(sock);
+    }
+    probeNow(timeout: resumeProbeTimeout);
+  }
+
+  void _onShardFresh(_ShardSocket sock) {
+    if (_relayUnsupportedKinds.isNotEmpty) {
+      sock.sendNext(PoolFrame.kindBlacklist(_relayUnsupportedKinds));
+    }
+    for (final entry in _activeFilters.entries) {
+      sock.sendNext(PoolFrame.req(entry.key, entry.value));
+    }
+    sock.resendUnacked(next: true);
+  }
+
+  bool get freshLive => _sockets.any((s) =>
+      s.isOpen &&
+      s.hasFrameSinceConnect &&
+      !s.refreshing &&
+      s.connectedRelays.isNotEmpty);
+
+  final List<Completer<void>> _liveWaiters = [];
+
+  Future<void> whenLive({Duration timeout = const Duration(seconds: 5)}) async {
+    if (_disposed || freshLive) return;
+    final c = Completer<void>();
+    _liveWaiters.add(c);
+    await c.future.timeout(timeout, onTimeout: () {});
+    _liveWaiters.remove(c);
+  }
+
+  void _releaseLiveWaiters() {
+    final waiters = List<Completer<void>>.of(_liveWaiters);
+    _liveWaiters.clear();
+    for (final c in waiters) {
+      if (!c.isCompleted) c.complete();
+    }
+  }
+
+  void probeNow({Duration timeout = probeTimeout}) {
+    if (_disposed || _livenessHeld) return;
+    final now = _now();
+    var sent = false;
+    for (final sock in _sockets) {
+      if (!sock.isOpen) continue;
+      final pending = sock.probe;
+      if (pending != null) {
+        if (timeout < pending.limit) {
+          sock.probe = (id: pending.id, at: pending.at, limit: timeout);
+        }
+        sent = true;
+        continue;
+      }
+      if (now.difference(sock.lastActiveAt) < resumeFresh) continue;
+      _sendProbe(sock, now, limit: timeout);
+      sent = true;
+    }
+    if (!sent) return;
+    _probeCheckTimer?.cancel();
+    _probeCheckTimer =
+        Timer(timeout + const Duration(milliseconds: 250), () {
+      _probeCheckTimer = null;
+      _checkShardHealth();
+    });
+  }
+
+  bool _settleProbe(_ShardSocket sock, String subId) {
+    final probe = sock.probe;
+    if (probe == null || probe.id != subId) return false;
+    sock.probe = null;
+    sock.upstreamAt = _now();
+    _probeFails.remove(sock.shard.id);
+    sock.send(PoolFrame.close(subId));
+    return true;
+  }
+
+  void _onShardLost(_ShardSocket sock, DateTime? lastLiveAt) {
+    if (_disposed) return;
+    _lostShards.add(sock.shard.id);
+    onShardLost?.call(lastLiveAt);
+  }
+
+  final Duration confirmTimeout;
+
+  final DateTime Function() _now;
+
+  /// Latches once any shard confirms; pre-connect failure counting then stops.
+  bool _proxyEverConnected = false;
+
+  bool _unreachableFired = false;
+
+  /// True after [disconnectAll], so a late shard callback can't fire the trigger.
+  bool _disposed = false;
+
+  final List<_ShardSocket> _sockets = [];
+
+  /// Active subscriptions and filters by subId, re-REQ'd on a reconnected shard.
+  final Map<String, Subscription> _subscriptions = {};
+  final Map<String, List<NostrFilter>> _activeFilters = {};
+
+  /// Global cross-shard event dedup (PWA cap 10k).
+  final EventDeduper _deduper = EventDeduper(maxIds: 10000);
+
+  /// Pool-owned traffic counters: bytes from shard sockets, events and latency from [_onShardMessage].
+  final RelayStats _stats = RelayStats();
+
+  /// 1s throughput sampler (history cap 60).
+  Timer? _sampler;
+
+  /// subId to REQ send time; latency is keyed by shard id and cleared once every open shard EOSEs.
+  final Map<String, int> _reqSentAt = {};
+
+  /// subId to shards that already EOSE'd, so each shard is stamped once.
+  final Map<String, Set<String>> _eosedShards = {};
+
+  /// Relay url to kinds it rejected, pushed to workers as `KIND_BLACKLIST`.
+  final Map<String, Set<int>> _relayUnsupportedKinds = {};
+
+  /// Recent event id to kind (cap 1000), mapping OK rejections back to a kind.
+  final Map<String, int> _sentEventKinds = {};
+
+  /// subId to requested kinds (cap 2000), for CLOSED rejections without an explicit kind.
+  final Map<String, Set<int>> _subKinds = {};
+
+  /// Relays reported connected across all shards, deduped.
+  @override
+  int get connectedCount {
+    final s = <String>{};
+    for (final sock in _sockets) {
+      s.addAll(sock.connectedRelays);
+    }
+    return s.length;
+  }
+
+  /// Deduped relay URLs reported connected across all shards.
+  @override
+  Set<String> get connectedRelayUrls {
+    final s = <String>{};
+    for (final sock in _sockets) {
+      s.addAll(sock.connectedRelays);
+    }
+    return s;
+  }
+
+  int get openShardCount => _sockets.where((s) => s.isOpen).length;
+
+  /// Fresh aggregate counters; shard info is rebuilt from live sockets since the backend sends no `POOL:SHARDS`.
+  @override
+  RelayStats get stats {
+    _stats.shardInfo
+      ..clear()
+      ..addAll([
+        for (final sock in _sockets)
+          ShardInfo(
+            id: sock.shard.id,
+            status: sock.isOpen ? 'connected' : 'connecting',
+            connected: sock.connectedRelays.length,
+            total: sock.shard.relays.length,
+          ),
+      ]);
+    return _stats.snapshot();
+  }
+
+  /// Starts the 1s throughput sampler (idempotent).
+  void _startSampler() {
+    if (_sampler != null) return;
+    _sampler = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _stats.sampleThroughput(),
+    );
+  }
+
+  void _stopSampler() {
+    _sampler?.cancel();
+    _sampler = null;
+  }
+
+  List<RelayShard> get shards => _sockets.map((s) => s.shard).toList();
+
+  Set<String> get blockedRelays => Set.unmodifiable(_blocked);
+
+  bool isRelayBlocked(String url) => RelayBlock.isBlocked(_blocked, url);
+
+  void setBlockedRelays(Iterable<String> urls) {
+    final next = RelayBlock.toSet(urls);
+    if (next.length == _blocked.length && next.containsAll(_blocked)) return;
+    _blocked = next;
+    _reconcileShards();
+  }
+
+  List<String> _added = const [];
+
+  List<String> get addedRelays => List.unmodifiable(_added);
+
+  ({bool open, DateTime? openedAt})? addedShardState(String url) {
+    for (final s in _sockets) {
+      if (s.shard.role == 'added' && s.shard.relays.contains(url)) {
+        return (open: s.isOpen, openedAt: s.openedAt);
+      }
+    }
+    return null;
+  }
+
+  Set<String> Function()? anonKeys;
+
+  Set<String> Function()? anonLane;
+
+  void setAddedRelays(Iterable<String> urls) {
+    final next = urls.toList();
+    if (next.length == _added.length &&
+        Iterable<int>.generate(next.length).every((i) => next[i] == _added[i])) {
+      return;
+    }
+    _added = next;
+    _reconcileShards();
+  }
+
+  String? _addedFrame(String frame) {
+    if (frame.startsWith('["REQ"')) return _addedReq(frame);
+    if (!frame.startsWith('["EVENT"') &&
+        !frame.startsWith('["DM_EVENT"') &&
+        !frame.startsWith('["GEO_EVENT"')) {
+      return frame;
+    }
+    final keys = anonKeys?.call() ?? const <String>{};
+    final lane = anonLane?.call() ?? const <String>{};
+    if (keys.isEmpty && lane.isEmpty) return frame;
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(frame);
+    } catch (_) {
+      return frame;
+    }
+    if (decoded is! List || decoded.length < 2) return frame;
+    return RelayAdd.anonEvent(decoded[1], keys, lane) ? null : frame;
+  }
+
+  String? _addedReq(String frame) {
+    final keys = anonKeys?.call() ?? const <String>{};
+    if (keys.isEmpty) return frame;
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(frame);
+    } catch (_) {
+      return frame;
+    }
+    if (decoded is! List) return frame;
+    final out = RelayAdd.stripKeys(decoded, keys);
+    if (identical(out, decoded)) return frame;
+    return out == null ? null : jsonEncode(out);
+  }
+
+  static const Duration relayListGrace = Duration(seconds: 15);
+
+  final Map<String, DateTime> _relayLastSeen = {};
+
+  void _noteConnectedRelays() {
+    final now = _now();
+    final connected = connectedRelayUrls;
+    for (final u in connected) {
+      _relayLastSeen[u] = now;
+    }
+    _relayLastSeen.removeWhere((u, t) =>
+        !connected.contains(u) && now.difference(t) > relayListGrace);
+  }
+
+  Map<String, bool> get relayListStatus {
+    _noteConnectedRelays();
+    final connected = connectedRelayUrls;
+    return {for (final u in _relayLastSeen.keys) u: connected.contains(u)};
+  }
+
+  @override
+  void connectAll() {
+    _startSampler();
+    _startHealthCheck();
+    if (_sockets.isNotEmpty) {
+      for (final s in _sockets) {
+        s.connect();
+      }
+      return;
+    }
+    final layout = shardRelaysByRole(
+      _allRelays,
+      _geoRelayUrls,
+      _dmRelays,
+      permanentBlacklist: _permanentBlacklist,
+      blocked: _blocked,
+      added: _added,
+    );
+    for (final shard in layout) {
+      final sock = _ShardSocket(
+        shard: shard,
+        url: _poolUrl,
+        channelFactory: _channelFactory,
+        rng: _rng,
+        stats: _stats,
+        onMessage: _onShardMessage,
+        onConnected: _onShardConnected,
+        onClosed: _onShardClosed,
+        onFirstFrame: _onShardFirstFrame,
+        onLost: _onShardLost,
+        onLinked: (_) => _noteCount(),
+        reqFilter: _addedFrame,
+        confirmTimeout: confirmTimeout,
+        now: _now,
+      );
+      _sockets.add(sock);
+      sock.connect();
+    }
+  }
+
+  /// Sends one REQ to every open shard socket.
+  @override
+  Subscription subscribe(List<NostrFilter> filters, {String? subId}) {
+    final id = subId ?? generateSubId(_rng);
+    final sub = Subscription.forTransport(
+      id,
+      this,
+      _verify,
+      max(1, openShardCount),
+      eoseQuorum: eoseQuorum,
+      eoseTimeout: eoseTimeout,
+      onRejected: (event) => _deduper.forget(copyKey(event)),
+    );
+    _subscriptions[id] = sub;
+    _activeFilters[id] = filters;
+    // Stamp REQ send time for per-shard REQ→EOSE latency.
+    _reqSentAt[id] = DateTime.now().millisecondsSinceEpoch;
+    _eosedShards[id] = <String>{};
+    _trackSubKinds(id, filters);
+    sub.startEose();
+    final frame = PoolFrame.req(id, filters);
+    for (final sock in _sockets) {
+      sock.send(frame);
+    }
+    return sub;
+  }
+
+  @override
+  void closeSubscription(Subscription sub) {
+    _subscriptions.remove(sub.subId);
+    _activeFilters.remove(sub.subId);
+    _reqSentAt.remove(sub.subId);
+    _eosedShards.remove(sub.subId);
+    final frame = PoolFrame.close(sub.subId);
+    for (final sock in _sockets) {
+      sock.send(frame);
+    }
+  }
+
+  /// Broadcasts `["EVENT",e]` to every shard; returns sockets written, since OKs arrive async.
+  @override
+  Future<int> publish(NostrEvent event) async {
+    if (_mustHold) return _held.hold((via) => via.publish(event), event: event);
+    // Remember the kind so an attributed OK rejection can blacklist it.
+    _trackSentEventKind(event);
+    onPublishCharge?.call(1);
+    return _broadcast(PoolFrame.event(event), eventId: event.id);
+  }
+
+  /// Publishes a DM gift wrap via `["DM_EVENT",e]`.
+  @override
+  Future<int> publishDm(NostrEvent event) async {
+    if (_mustHold) {
+      return _held.hold((via) => via.publishDm(event), event: event);
+    }
+    return _broadcast(PoolFrame.dmEvent(event), eventId: event.id);
+  }
+
+  /// `["GEO_EVENT",e,[urls]]` prioritizing the closest geo relays; plain EVENT when none are known.
+  @override
+  Future<int> publishGeo(
+      NostrEvent event, List<String> closestRelayUrls) async {
+    if (_mustHold) {
+      return _held.hold((via) => via.publishGeo(event, closestRelayUrls),
+          event: event);
+    }
+    onPublishCharge?.call(1);
+    if (closestRelayUrls.isEmpty) {
+      return _broadcast(PoolFrame.event(event), eventId: event.id);
+    }
+    return _broadcast(PoolFrame.geoEvent(event, closestRelayUrls),
+        eventId: event.id);
+  }
+
+  bool get _mustHold => !_disposed && !_sockets.any((s) => s.isOpen);
+
+  List<NostrEvent> get heldEvents => _held.events;
+
+  int _broadcast(String frame, {String? eventId}) {
+    var n = 0;
+    for (final sock in _sockets) {
+      if (sock.send(frame)) n++;
+      if (eventId != null && eventId.isNotEmpty) sock.noteSent(eventId, frame);
+    }
+    return n;
+  }
+
+  @override
+  Future<void> disconnectAll() async {
+    _disposed = true;
+    _liveRetry.dispose();
+    _releaseLiveWaiters();
+    _held.dropAll();
+    _stopSampler();
+    _stopLiveness();
+    final subs = _subscriptions.values.toList();
+    for (final s in subs) {
+      await s.close();
+    }
+    final closing = [for (final s in _sockets) s.close()];
+    _sockets.clear();
+    await Future.wait(closing);
+  }
+
+  void handOverHeld(PoolTransport next) => _held.flush(next);
+
+  /// Closes shard sockets but keeps [Subscription]s alive for the proxy/direct swap.
+  Future<void> disconnectSocketsOnly() async {
+    _disposed = true;
+    _liveRetry.dispose();
+    _releaseLiveWaiters();
+    _stopSampler();
+    _stopLiveness();
+    _subscriptions.clear();
+    _activeFilters.clear();
+    _reqSentAt.clear();
+    _eosedShards.clear();
+    final closing = [for (final s in _sockets) s.close()];
+    _sockets.clear();
+    await Future.wait(closing);
+  }
+
+  /// Live subscriptions and filters, for replay onto a replacement pool.
+  Map<String, ({Subscription sub, List<NostrFilter> filters})>
+      activeSubscriptions() => {
+            for (final e in _subscriptions.entries)
+              e.key: (
+                sub: e.value,
+                filters: _activeFilters[e.key] ?? const [],
+              ),
+          };
+
+  /// Adopts [sub] from a previous pool and re-broadcasts its REQ; its dedup suppresses repeats.
+  void replaySubscription(Subscription sub, List<NostrFilter> filters) {
+    if (sub.isClosed) return;
+    sub.adoptTransport(this);
+    final id = sub.subId;
+    _subscriptions[id] = sub;
+    _activeFilters[id] = filters;
+    _reqSentAt[id] = DateTime.now().millisecondsSinceEpoch;
+    _eosedShards[id] = <String>{};
+    _trackSubKinds(id, filters);
+    final frame = PoolFrame.req(id, filters);
+    for (final sock in _sockets) {
+      sock.send(frame);
+    }
+  }
+
+  /// Re-shards for new [geoRelayUrls]: update, close or open sockets; no-op before [connectAll] or when unchanged.
+  @override
+  void updateGeoRelays(List<String> geoRelayUrls) {
+    final next = [...geoRelayUrls];
+    if (_geoRelayUrls.length == next.length &&
+        next.toSet().containsAll(_geoRelayUrls)) {
+      return;
+    }
+    _geoRelayUrls
+      ..clear()
+      ..addAll(next);
+    _reconcileShards();
+  }
+
+  void _reconcileShards() {
+    if (_sockets.isEmpty) return; // connectAll() will shard with these urls.
+
+    final layout = shardRelaysByRole(
+      _allRelays,
+      _geoRelayUrls,
+      _dmRelays,
+      permanentBlacklist: _permanentBlacklist,
+      blocked: _blocked,
+      added: _added,
+    );
+    final byId = {for (final s in layout) s.id: s};
+
+    bool sameRelays(List<String> a, List<String> b) {
+      if (a.length != b.length) return false;
+      final setA = a.toSet();
+      for (final v in b) {
+        if (!setA.contains(v)) return false;
+      }
+      return true;
+    }
+
+    final survivors = <_ShardSocket>[];
+    for (final sock in _sockets) {
+      final shard = byId[sock.shard.id];
+      if (shard == null) {
+        unawaited(sock.close());
+        continue;
+      }
+      survivors.add(sock);
+      if (!sameRelays(sock.shard.relays, shard.relays) ||
+          !sameRelays(sock.shard.dmRelays, shard.dmRelays)) {
+        sock.shard = shard;
+        if (sock.isOpen) {
+          sock.send(PoolFrame.relays(shard.relays, shard.dmRelays));
+        }
+      }
+    }
+    _sockets
+      ..clear()
+      ..addAll(survivors);
+
+    final haveIds = {for (final s in _sockets) s.shard.id};
+    for (final shard in layout) {
+      if (haveIds.contains(shard.id)) continue;
+      final sock = _ShardSocket(
+        shard: shard,
+        url: _poolUrl,
+        channelFactory: _channelFactory,
+        rng: _rng,
+        stats: _stats,
+        onMessage: _onShardMessage,
+        onConnected: _onShardConnected,
+        onClosed: _onShardClosed,
+        onFirstFrame: _onShardFirstFrame,
+        onLost: _onShardLost,
+        onLinked: (_) => _noteCount(),
+        reqFilter: _addedFrame,
+        confirmTimeout: confirmTimeout,
+        now: _now,
+      );
+      _sockets.add(sock);
+      sock.connect();
+    }
+  }
+
+  List<String> get geoRelayUrls => List.unmodifiable(_geoRelayUrls);
+
+  /// Remembers a REQ's kinds so a later CLOSED rejection can blacklist them.
+  void _trackSubKinds(String subId, List<NostrFilter> filters) {
+    final kinds = <int>{};
+    for (final f in filters) {
+      final k = f.kinds;
+      if (k != null) kinds.addAll(k);
+    }
+    if (kinds.isEmpty) return;
+    _subKinds.remove(subId);
+    _subKinds[subId] = kinds;
+    if (_subKinds.length > 2000) {
+      _subKinds.remove(_subKinds.keys.first);
+    }
+  }
+
+  /// Remembers a published event's kind for mapping OK rejections.
+  void _trackSentEventKind(NostrEvent event) {
+    if (event.id.isEmpty) return;
+    _sentEventKinds.remove(event.id);
+    _sentEventKinds[event.id] = event.kind;
+    if (_sentEventKinds.length > 1000) {
+      _sentEventKinds.remove(_sentEventKinds.keys.first);
+    }
+  }
+
+  /// True when [reason] says the relay doesn't support the kind.
+  static bool _isUnsupportedKind(String reason) =>
+      isUnsupportedKindRejection(reason);
+
+  void _banRelay(String? url, String reason) {
+    if (url == null || !url.startsWith('wss://')) return;
+    if (url == RelayConfig.appRelay) return;
+    if (RelayConfig.defaultRelays.contains(url) || _dmRelays.contains(url)) {
+      return;
+    }
+    if (!_permanentBlacklist.add(url)) return;
+    debugPrint('[RelayPoolProxy] dropping $url for the session: $reason');
+    _reconcileShards();
+  }
+
+  /// The explicit kind number in [reason], if any.
+  static int? _extractUnsupportedKind(String reason) {
+    var m = RegExp(r'\bNIP[\s\-_:]*(\d+)\b', caseSensitive: false)
+        .firstMatch(reason);
+    if (m != null) return int.tryParse(m.group(1)!);
+    m = RegExp(r'\bkinds?[\s\-_:]*(\d+)\b', caseSensitive: false)
+        .firstMatch(reason);
+    if (m != null) return int.tryParse(m.group(1)!);
+    return null;
+  }
+
+  /// Blacklists the reason's kind for [relayUrl], else every kind the REQ asked for.
+  void _recordUnsupportedKindRejection(
+      String? relayUrl, String subId, String reason) {
+    if (relayUrl == null || !relayUrl.startsWith('wss://')) return;
+    final specific = _extractUnsupportedKind(reason);
+    final kinds = specific != null ? {specific} : _subKinds[subId];
+    if (kinds == null || kinds.isEmpty) return;
+    final set = _relayUnsupportedKinds.putIfAbsent(relayUrl, () => <int>{});
+    var added = false;
+    for (final k in kinds) {
+      if (set.add(k)) added = true;
+    }
+    if (added) _sendKindBlacklistToWorkers();
+  }
+
+  /// Blacklists the published event's remembered kind for [relayUrl].
+  void _recordEventKindRejection(String? relayUrl, String eventId) {
+    if (relayUrl == null || !relayUrl.startsWith('wss://')) return;
+    if (eventId.isEmpty) return;
+    final kind = _sentEventKinds[eventId];
+    if (kind == null) return;
+    final set = _relayUnsupportedKinds.putIfAbsent(relayUrl, () => <int>{});
+    if (set.add(kind)) _sendKindBlacklistToWorkers();
+  }
+
+  /// Pushes the current blacklist to every open shard socket.
+  void _sendKindBlacklistToWorkers() {
+    if (_relayUnsupportedKinds.isEmpty) return;
+    final frame = PoolFrame.kindBlacklist(_relayUnsupportedKinds);
+    for (final sock in _sockets) {
+      sock.send(frame);
+    }
+  }
+
+  void _onShardConnected(_ShardSocket sock) {
+    // Push the kind blacklist after RELAYS and before any REQ.
+    if (_relayUnsupportedKinds.isNotEmpty) {
+      sock.send(PoolFrame.kindBlacklist(_relayUnsupportedKinds));
+    }
+    // Re-issue every active subscription on the (re)connected shard.
+    for (final entry in _activeFilters.entries) {
+      sock.send(PoolFrame.req(entry.key, entry.value));
+    }
+    sock.resendUnacked();
+    _held.flush(this);
+  }
+
+  ProxyDownRule downRule = ProxyDownRule();
+
+  bool oneTry = false;
+
+  void goLive() {
+    oneTry = false;
+    downRule = ProxyDownRule(link: downRule.link);
+    if (_disposed || _livenessHeld) return;
+    for (final sock in _sockets) {
+      sock.unhold();
+    }
+    retryDownShards();
+  }
+
+  void _onShardFirstFrame(_ShardSocket sock) => downRule.success();
+
+  void _onShardClosed(_ShardSocket sock) {
+    _noteCount();
+    if (_unreachableFired || _disposed || !sock.lastCloseFailed) return;
+    final bool down;
+    if (oneTry) {
+      sock.hold();
+      down = _sockets.every((s) => s.isHeld && !s.isOpen);
+    } else {
+      down = downRule.failure(_now(),
+          shard: sock.shard.id,
+          shardCount: _sockets.length,
+          rateLimited: sock.lastCloseRateLimited);
+    }
+    if (!down) return;
+    if (_sockets.any((s) => s.isOpen && s.hasFrameSinceConnect)) return;
+    _unreachableFired = true;
+    final cb = onProxyUnreachable;
+    if (cb != null) {
+      debugPrint('[RelayPoolProxy] proxy unreachable: ${downRule.failures} '
+          'failed connects over ${downRule.span.inSeconds}s; '
+          'falling back to direct relays');
+      cb();
+    }
+  }
+
+  /// Records REQ→EOSE latency once per shard, dropping the timing once every open shard has EOSE'd.
+  void _stampShardLatency(String subId, String shardId) {
+    final sentAt = _reqSentAt[subId];
+    if (sentAt == null) return;
+    final eosed = _eosedShards[subId] ??= <String>{};
+    if (!eosed.add(shardId)) return; // Already stamped this shard.
+    final ms = DateTime.now().millisecondsSinceEpoch - sentAt;
+    if (ms >= 0) _stats.latencyPerRelay[shardId] = ms;
+    if (eosed.length >= openShardCount) {
+      _reqSentAt.remove(subId);
+      _eosedShards.remove(subId);
+    }
+  }
+
+  bool Function(Subscription sub)? retiredSub;
+
+  bool Function(Subscription sub)? liveSub;
+
+  late final LiveSubRetry _liveRetry = LiveSubRetry(() => _now());
+
+  void _noteLiveClosed(String shardId, String subId, String reason) {
+    final sub = _subscriptions[subId];
+    if (_disposed || sub == null || sub.isClosed) return;
+    if (retiredSub?.call(sub) ?? false) return;
+    if (!(liveSub?.call(sub) ?? true)) return;
+    if (_liveRetry.note(
+        shardId, subId, reason, (ids) => _resendClosed(shardId, ids))) {
+      onShardLost?.call(_now());
+    }
+  }
+
+  void _resendClosed(String shardId, Set<String> ids) {
+    if (_disposed) return;
+    var sent = false;
+    var wanted = false;
+    for (final id in ids) {
+      final sub = _subscriptions[id];
+      final filters = _activeFilters[id];
+      if (sub == null || sub.isClosed || filters == null) continue;
+      if (retiredSub?.call(sub) ?? false) continue;
+      if (!(liveSub?.call(sub) ?? true)) continue;
+      wanted = true;
+      final frame = PoolFrame.req(id, filters);
+      for (final sock in _sockets) {
+        if (sock.shard.id == shardId && sock.send(frame)) sent = true;
+      }
+    }
+    if (sent || !wanted) onShardReconnected?.call();
+  }
+
+  /// Maps worker split-child ids (`<parent>~c<n>`, for REQs over 10 filters) to the parent, or events are dropped.
+  static String _parentSubId(String subId) {
+    final i = subId.indexOf('~c');
+    return i > 0 ? subId.substring(0, i) : subId;
+  }
+
+  bool Function(NostrEvent event, String? relayUrl)? _geoOriginAllows;
+  @override
+  set geoOriginAllows(bool Function(NostrEvent event, String? relayUrl)? fn) =>
+      _geoOriginAllows = fn;
+
+  void _onShardMessage(_ShardSocket sock, PoolMessage msg) {
+    // A parseable frame means the proxy is reachable: latch it and fire the one-shot connected signal.
+    if (!_proxyEverConnected) {
+      _proxyEverConnected = true;
+      final cb = onProxyConnected;
+      if (cb != null && !_disposed) cb();
+    }
+    if (_lostShards.remove(sock.shard.id) && !_disposed) {
+      onShardReconnected?.call();
+    }
+    if (msg is PoolEose && _settleProbe(sock, msg.subId)) return;
+    if (msg is PoolClosed && _settleProbe(sock, msg.subId)) return;
+    switch (msg) {
+      case PoolEvent(:final subId, :final event, :final sourceRelay):
+        if (RelayConfig.isAppRelayOnly(
+                event.kind, event.tagValue('g'), event.tagValue('d')) &&
+            sourceRelay != RelayConfig.appRelay) {
+          return;
+        }
+        // Gate before the cross-shard dedup, for the same reason.
+        final geoGate = _geoOriginAllows;
+        if (geoGate != null && !geoGate(event, sourceRelay)) return;
+        // Record before dedup, since the discarded copies are the relay list.
+        eventProvenance.record(event, sourceRelay);
+        // Cross-shard dedup: the first shard to deliver an id wins.
+        if (!_deduper.add(copyKey(event))) return;
+        final eventSubId = _parentSubId(subId);
+        // Post-dedup event accounting.
+        _stats.totalEvents++;
+        _stats.eventsThisSecond++;
+        // Per-relay and per-kind counts share the sourceRelay attribution; unattributed events are left out.
+        if (sourceRelay != null && sourceRelay.startsWith('wss://')) {
+          _stats.eventsPerRelay[sourceRelay] =
+              (_stats.eventsPerRelay[sourceRelay] ?? 0) + 1;
+          _stats.recordRelayKind(sourceRelay, event.kind,
+              utf8ByteLength(jsonEncode(event.toJson())));
+        }
+        final sub = _subscriptions[eventSubId];
+        if (sub != null) unawaited(sub.onEvent(sock.shard.id, event));
+      case PoolEose(:final subId):
+        {
+          final id = _parentSubId(subId);
+          _stampShardLatency(id, sock.shard.id);
+          _subscriptions[id]?.onEose(sock.shard.id);
+        }
+      case PoolClosed(:final subId, :final reason, :final relayUrl):
+        {
+          // A kind-flavored CLOSED reason feeds the per-relay kind blacklist.
+          final id = _parentSubId(subId);
+          if (_isUnsupportedKind(reason)) {
+            _recordUnsupportedKindRejection(relayUrl, id, reason);
+          } else if (isRelayWideRejection(reason)) {
+            _banRelay(relayUrl, reason);
+          }
+          _stampShardLatency(id, sock.shard.id);
+          _subscriptions[id]?.onEose(sock.shard.id, closed: true);
+          _noteLiveClosed(sock.shard.id, id, reason);
+        }
+      case PoolOk(:final id, :final accepted, :final message, :final relayUrl):
+        onPublishResult?.call(id, accepted, message, relayUrl);
+        if (accepted) {
+          onPublishAccepted?.call(id);
+        } else if (isRateLimitRejection(message)) {
+          onPublishRateLimited?.call(id);
+        }
+        // Proxy publish() doesn't await OKs; a kind-flavored reason feeds the blacklist regardless of accepted.
+        if (_isUnsupportedKind(message)) {
+          _recordEventKindRejection(relayUrl, id);
+        } else if (isRelayWideRejection(message)) {
+          _banRelay(relayUrl, message);
+        }
+        break;
+      case PoolNotice(:final reason, :final relayUrl):
+        if (!_isUnsupportedKind(reason) && isRelayWideRejection(reason)) {
+          _banRelay(relayUrl, reason);
+        }
+        break;
+      case PoolStatus(:final latency):
+        // Fold this worker's per-relay latency into the aggregate.
+        latency.forEach((url, ms) {
+          _stats.latencyPerRelay[url] = ms;
+        });
+        _noteConnectedRelays();
+        _noteCount();
+        break;
+      case PoolSeen(:final eventId, :final relayUrl):
+        eventProvenance.addSource(eventId, relayUrl);
+        break;
+      case PoolRelayBan(:final url):
+        // Mirror the proxy's permanent ban so future shard layouts exclude the relay.
+        _permanentBlacklist.add(url);
+        break;
+      case PoolRetract(:final eventId):
+        onEventRetracted?.call(eventId);
+        break;
+      case PoolPing():
+        // Keepalive; no PONG is needed.
+        break;
+    }
+  }
+
+  /// Relays banned this session plus any seed blacklist.
+  Set<String> get permanentBlacklist => Set.unmodifiable(_permanentBlacklist);
+}

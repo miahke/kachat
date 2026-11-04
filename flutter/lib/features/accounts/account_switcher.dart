@@ -1,0 +1,680 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../core/crypto/bech32_codec.dart' show encodeNsecBytes;
+import '../../core/theme/nym_colors.dart';
+import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
+import '../../core/utils/secret_screen.dart';
+import '../../state/nostr_controller.dart';
+import '../../widgets/common/hit_slop.dart';
+import '../../widgets/common/app_dialog.dart';
+import '../../widgets/common/nym_avatar.dart';
+import '../../widgets/common/nym_label.dart';
+import '../../widgets/nym_icons.dart';
+import '../i18n/i18n.dart';
+import '../identity/modal_chrome.dart';
+import '../toasts/toast_center.dart';
+import 'account_host.dart';
+import 'account_logic.dart';
+import '../../widgets/common/nym_sheet.dart';
+import '../../widgets/common/nym_tooltip.dart';
+import '../../widgets/common/dialog_button.dart';
+import '../settings/settings_widgets.dart' show SettingsToggleRow;
+
+String accountMethodLabel(String method) {
+  switch (method) {
+    case 'nsec':
+      return 'nsec';
+    case 'extension':
+      return tr('Extension (NIP-07)');
+    case 'nip46':
+      return tr('Bunker (NIP-46)');
+    case 'anonymous':
+      return tr('Anonymous');
+    case 'ephemeral':
+      return tr('Ephemeral');
+  }
+  return tr('Setting up');
+}
+
+String accountDisplayName(AccountEntry a) {
+  if (a.pubkey.isEmpty) return tr('New identity');
+  return getNymFromPubkey(a.nym.isEmpty ? 'nym' : a.nym, a.pubkey);
+}
+
+String accountLandingText(AccountIndex index, String id) {
+  final plan = AccountLogic.plan(index, RemoveAccountOp(id));
+  final land = plan.ok ? plan.index.activeAccount : null;
+  if (id != index.active) {
+    return land == null
+        ? ''
+        : tr('You will stay on {nym}.', {'nym': accountDisplayName(land)});
+  }
+  return land == null
+      ? tr('You will return to the welcome screen.')
+      : tr('You will switch to {nym}.', {'nym': accountDisplayName(land)});
+}
+
+String accountKeyText(String method) => method == 'nip46' ||
+        method == 'extension'
+    ? tr('Its key stays in your signer; you can add it again later.')
+    : tr('Its key is stored only on this device: back up the nsec '
+        'first or you lose this identity.');
+
+String accountRemoveText(AccountEntry a, String landing) => [
+      tr('Remove {nym} from this device? Its messages, settings and caches '
+          'on this device are deleted.',
+          {'nym': accountDisplayName(a)}),
+      accountKeyText(a.method),
+      landing,
+    ].where((p) => p.isNotEmpty).join('\n\n');
+
+String accountLogoutAllText(AccountIndex index) {
+  final welcome = tr('You will return to the welcome screen.');
+  final all = index.accounts;
+  if (all.length == 1) return accountRemoveText(all.first, welcome);
+  return [
+    tr('Log out of all {n} identities? Every identity and its data on this '
+        'device is deleted. Back up any nsec you need first.',
+        {'n': all.length}),
+    all.map(accountDisplayName).join('\n'),
+    welcome,
+  ].where((p) => p.isNotEmpty).join('\n\n');
+}
+
+class AccountSwitchButton extends ConsumerStatefulWidget {
+  const AccountSwitchButton({super.key});
+
+  @override
+  ConsumerState<AccountSwitchButton> createState() =>
+      _AccountSwitchButtonState();
+}
+
+class _AccountSwitchButtonState extends ConsumerState<AccountSwitchButton> {
+  bool _hover = false;
+  bool _focus = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final api = ref.watch(accountsProvider);
+    if (api == null) return const SizedBox.shrink();
+    final c = context.nym;
+    final lit = _hover || _focus;
+    final fg = lit ? c.primary : c.textDim;
+    final label = tr('Manage Identities');
+    final row = InkWell(
+      key: const ValueKey('accountSwitchBtn'),
+      borderRadius: NymRadius.rsm,
+      onTap: () => showAccountSwitcher(context),
+      onHover: (v) => setState(() => _hover = v),
+      onFocusChange: (v) => setState(() => _focus = v),
+      child: Container(
+        width: 40,
+        height: 40,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: lit
+              ? (c.isLight
+                  ? Colors.black.withValues(alpha: 0.05)
+                  : c.primaryA(0.1))
+              : Colors.transparent,
+          borderRadius: NymRadius.rsm,
+        ),
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
+          children: [
+            NymSvgIcon(NymIcons.accountSwitch, size: 18, color: fg),
+            ValueListenableBuilder<AccountIndex>(
+              valueListenable: api.changes,
+              builder: (context, index, _) {
+                final unread = index.accounts
+                    .any((a) => a.id != index.active && a.unread > 0);
+                if (!unread) return const SizedBox.shrink();
+                return Positioned(
+                  top: -7,
+                  right: -7,
+                  child: Container(
+                    key: const ValueKey('accountSwitchUnreadDot'),
+                    width: 9,
+                    height: 9,
+                    decoration: BoxDecoration(
+                      color: c.danger,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: c.bg, width: 2),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+    return HitSlop(
+      child: Semantics(
+        container: true,
+        button: true,
+        label: label,
+        excludeSemantics: true,
+        onTap: () => showAccountSwitcher(context),
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              NymTooltip(message: label, child: row),
+              if (_focus && FocusManager.instance.highlightMode ==
+                  FocusHighlightMode.traditional)
+                Positioned(
+                  left: -3,
+                  top: -3,
+                  right: -3,
+                  bottom: -3,
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        border: Border.all(color: c.secondary, width: 2),
+                        borderRadius: NymRadius.rsm,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> showAccountSwitcher(BuildContext context) {
+  return showNymSheet<void>(context, (ctx) {
+    final panel = AccountSwitcherPanel(sheet: NymSheetScope.of(ctx));
+    return nymSheetOr(
+      ctx,
+      panel,
+      (panel) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: ModalChrome.box(ctx.nym, child: panel),
+        ),
+      ),
+    );
+  });
+}
+
+class AccountSwitcherPanel extends ConsumerStatefulWidget {
+  const AccountSwitcherPanel({super.key, required this.sheet});
+
+  final bool sheet;
+
+  @override
+  ConsumerState<AccountSwitcherPanel> createState() =>
+      _AccountSwitcherPanelState();
+}
+
+class _AccountSwitcherPanelState extends ConsumerState<AccountSwitcherPanel> {
+  AccountsController? _api;
+
+  @override
+  void initState() {
+    super.initState();
+    _api = ref.read(accountsProvider);
+  }
+
+  void _close() {
+    final nav = Navigator.of(context);
+    if (nav.canPop()) nav.pop();
+  }
+
+  Future<void> _switch(AccountEntry a) async {
+    final api = _api;
+    if (api == null) return;
+    _close();
+    await api.switchTo(a.id);
+  }
+
+  Future<void> _add() async {
+    final api = _api;
+    if (api == null) return;
+    if (api.changes.value.accounts.length >= AccountLogic.maxAccounts) {
+      showToast(tr(
+          'You can keep up to {n} identities on this device. Remove one to add '
+          'another.',
+          {'n': AccountLogic.maxAccounts}));
+      return;
+    }
+    _close();
+    final err = await api.add();
+    if (err == 'pending') {
+      showToast(tr('Finish setting up the new identity first.'));
+    } else if (err == 'cap') {
+      showToast(tr(
+          'You can keep up to {n} identities on this device. Remove one to add '
+          'another.',
+          {'n': AccountLogic.maxAccounts}));
+    }
+  }
+
+  Future<String?> _nsecFor(AccountEntry a) async {
+    final api = _api;
+    if (api == null) return null;
+    if (a.id == api.changes.value.active) {
+      try {
+        final sk = ref.read(nostrControllerProvider).identity?.privkey;
+        if (sk != null) return encodeNsecBytes(sk);
+      } catch (_) {}
+    }
+    return api.storedNsec(a.id);
+  }
+
+  Future<void> _remove(AccountEntry a) async {
+    final api = _api;
+    if (api == null) return;
+    final nsec = await _nsecFor(a);
+    if (!mounted) return;
+    final index = api.changes.value;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => _RemoveAccountDialog(
+        message: accountRemoveText(a, accountLandingText(index, a.id)),
+        nsec: nsec,
+      ),
+    );
+    if (ok != true) return;
+    final active = a.id == api.changes.value.active;
+    if (active && mounted) _close();
+    await api.remove(a.id);
+  }
+
+  Future<void> _logoutAll() async {
+    final api = _api;
+    if (api == null) return;
+    final ok = await showAppConfirm(
+      context,
+      accountLogoutAllText(api.changes.value),
+      title: tr('Log out of all identities'),
+      okLabel: tr('Log out of all identities'),
+      danger: true,
+    );
+    if (!ok || !mounted) return;
+    _close();
+    await api.logoutAll();
+  }
+
+  Future<void> _toggleNotify(AccountEntry a) async {
+    final api = _api;
+    if (api == null) return;
+    if (a.notifyInactive) {
+      await api.setNotify(a.id, false);
+      return;
+    }
+    final err = await api.setNotify(a.id, true);
+    if (err == 'unsupported') {
+      showToast(tr('Anonymous and unfinished identities can\'t get notifications '
+          'while inactive.'));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final api = _api;
+    final c = context.nym;
+    if (api == null) return const SizedBox.shrink();
+    return ValueListenableBuilder<AccountIndex>(
+      valueListenable: api.changes,
+      builder: (context, index, _) {
+        final full = index.accounts.length >= AccountLogic.maxAccounts;
+        return ConstrainedBox(
+          constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(context).height * 0.85),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                height: 60,
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 20, 56, 8),
+                        child: Text(
+                          tr('Identities').toUpperCase(),
+                          style: TextStyle(
+                            color: c.primary,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                    ModalChrome.closeChip(c, _close),
+                  ],
+                ),
+              ),
+              if (index.accounts.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+                  child: Text(tr('No saved identities yet.'),
+                      style: TextStyle(color: c.textDim, fontSize: 13)),
+                ),
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  children: [
+                    for (final a in index.accounts)
+                      _AccountRow(
+                        key: ValueKey('accountRow-${a.id}'),
+                        account: a,
+                        active: a.id == index.active,
+                        onTap: a.id == index.active ? null : () => _switch(a),
+                        onRemove: () => _remove(a),
+                        onToggleNotify: () => _toggleNotify(a),
+                      ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _FooterButton(
+                        key: const ValueKey('accountLogoutAllBtn'),
+                        label: tr('Log out of all identities'),
+                        icon: NymIcons.logout,
+                        danger: true,
+                        enabled: index.accounts.isNotEmpty,
+                        onTap: _logoutAll,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _FooterButton(
+                        key: const ValueKey('accountAddBtn'),
+                        label: tr('Add identity'),
+                        icon: NymIcons.plus,
+                        enabled: !full,
+                        onTap: _add,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (full)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 14),
+                  child: Text(
+                    tr('You can keep up to {n} identities on this device.',
+                        {'n': AccountLogic.maxAccounts}),
+                    style: TextStyle(color: c.textDim, fontSize: 12),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _AccountRow extends StatelessWidget {
+  const _AccountRow({
+    super.key,
+    required this.account,
+    required this.active,
+    required this.onTap,
+    required this.onRemove,
+    required this.onToggleNotify,
+  });
+
+  final AccountEntry account;
+  final bool active;
+  final VoidCallback? onTap;
+  final VoidCallback onRemove;
+  final VoidCallback onToggleNotify;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final a = account;
+    final canNotify = a.pubkey.isNotEmpty && a.method != 'anonymous';
+    final main = InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            NymAvatar(
+              seed: a.pubkey.isEmpty ? a.id : a.pubkey,
+              size: 36,
+              imageUrl: a.avatar.isEmpty ? null : a.avatar,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  NymLabel(
+                    accountDisplayName(a),
+                    style: TextStyle(
+                      color: c.text,
+                      fontSize: 14,
+                      fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: c.glassBorder),
+                      borderRadius: NymRadius.rxs,
+                    ),
+                    child: Text(
+                      accountMethodLabel(a.method),
+                      style: TextStyle(color: c.textDim, fontSize: 11),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (!active && a.unread > 0)
+              Container(
+                key: ValueKey('accountUnread-${a.id}'),
+                margin: const EdgeInsets.only(right: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                decoration: BoxDecoration(
+                  color: c.primary,
+                  borderRadius: const BorderRadius.all(Radius.circular(10)),
+                ),
+                child: Text(
+                  a.unread > 99 ? '99+' : '${a.unread}',
+                  style: TextStyle(
+                    color: c.bg,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            if (active)
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: NymTooltip(
+                  message: tr('Active identity'),
+                  child: Icon(Icons.check,
+                      key: const ValueKey('accountActiveCheck'),
+                      size: 18,
+                      color: c.primary),
+                ),
+              ),
+            IconButton(
+              key: ValueKey('accountRemove-${a.id}'),
+              tooltip: tr('Remove identity'),
+              onPressed: onRemove,
+              icon: NymSvgIcon(NymIcons.close, size: 16, color: c.textDim),
+            ),
+          ],
+        ),
+      ),
+    );
+    return Container(
+      color: active ? c.primaryA(0.08) : null,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          main,
+          if (canNotify)
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                  MediaQuery.sizeOf(context).width <= 768 ? 16 : 64, 0, 16, 10),
+              child: SettingsToggleRow(
+                key: ValueKey('panel-notifyInactive-${a.id}'),
+                label: tr('Notify me for this identity while it\'s not active'),
+                hint: tr(
+                    'This can let the server see that these identities share a device.'),
+                value: a.notifyInactive,
+                spacing: 0,
+                onChanged: (_) => onToggleNotify(),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FooterButton extends StatelessWidget {
+  const _FooterButton({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    this.enabled = true,
+    this.danger = false,
+  });
+
+  final String label;
+  final String icon;
+  final VoidCallback onTap;
+  final bool enabled;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final fg = !enabled ? c.textDim : (danger ? c.danger : c.text);
+    return Opacity(
+      opacity: enabled ? 1 : 0.5,
+      child: InkWell(
+        onTap: enabled ? onTap : null,
+        borderRadius: NymRadius.rxs,
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 40),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            border: Border.all(color: c.glassBorder),
+            borderRadius: NymRadius.rxs,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              NymSvgIcon(icon, size: 14, color: fg),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: fg, fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RemoveAccountDialog extends StatelessWidget {
+  const _RemoveAccountDialog({
+    required this.message,
+    required this.nsec,
+  });
+
+  final String message;
+  final String? nsec;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final key = nsec;
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.all(24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: ModalChrome.box(
+          c,
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  tr('Remove identity'),
+                  style: TextStyle(
+                    color: c.text,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                NymText(
+                  message,
+                  style: TextStyle(color: c.textDim, fontSize: 13, height: 1.4),
+                ),
+                const SizedBox(height: 18),
+                DialogActions(
+                  alignment: WrapAlignment.end,
+                  children: [
+                    if (key != null)
+                      DialogButton.secondary(
+                        key: const ValueKey('accountCopyNsecBtn'),
+                        label: tr('Copy nsec'),
+                        onTap: () {
+                          unawaited(SecretScreen.copy(key));
+                          showToast(tr('Private key copied'));
+                        },
+                      ),
+                    DialogButton.secondary(
+                      label: tr('Cancel'),
+                      onTap: () => Navigator.of(context).pop(false),
+                    ),
+                    DialogButton.danger(
+                      key: const ValueKey('accountRemoveConfirmBtn'),
+                      label: tr('Remove'),
+                      onTap: () => Navigator.of(context).pop(true),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "arm64-v8a/libbitchat_vk.so": "e5825869e0571d1731d34d622d0aee3274aa63ccf404da347bb539317ff9c087",
+  "armeabi-v7a/libbitchat_vk.so": "bb9e04e48bab053f52ebae6b3b3d11b2550ff5481fe3090770d1875bd4053406",
+  "x86_64/libbitchat_vk.so": "9ccb448fe19cd38f9b2338cae1affc57b068632ee84827a1bc2ddadf98ae1ce5"
+}

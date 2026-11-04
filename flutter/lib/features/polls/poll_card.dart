@@ -1,0 +1,1290 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../core/theme/nym_colors.dart';
+import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
+import '../../models/message.dart';
+import '../../models/poll.dart';
+import '../../models/settings.dart';
+import '../../models/user.dart';
+import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
+import '../../widgets/chat/bitchat_user_color.dart';
+import '../../widgets/chat/message_row.dart'
+    show formatTime, formatFullTimestamp;
+import '../../widgets/common/nym_avatar.dart';
+import '../../widgets/context_menu/context_menu_actions.dart';
+import '../../widgets/context_menu/context_menu_panel.dart';
+import '../../widgets/context_menu/profile_badges.dart';
+import '../../widgets/nym_icons.dart';
+import '../i18n/i18n.dart';
+import '../reactions/reaction_picker.dart';
+import '../shop/cosmetics.dart';
+import '../shop/shop_widgets.dart';
+import '../translate/translate_languages.dart';
+import '../translate/translate_service.dart';
+import '../../widgets/anchored_popup.dart';
+import '../../widgets/common/nym_tooltip.dart';
+import '../../widgets/common/nym_label.dart';
+import '../layout/pointer_input.dart';
+
+/// Inline poll rendered as a full message row; tapping an option votes, the footer opens the voters list.
+class PollCard extends ConsumerStatefulWidget {
+  const PollCard({super.key, required this.poll, required this.settings});
+
+  final Poll poll;
+  final Settings settings;
+
+  @override
+  ConsumerState<PollCard> createState() => _PollCardState();
+}
+
+class _PollCardState extends ConsumerState<PollCard> {
+  // Inline translation state, set from the author menu or hover translate button.
+  bool _showTranslation = false;
+  String? _translateLangOverride;
+
+  /// Desktop row hover, driving the tint and hover buttons.
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final poll = widget.poll;
+    final settings = widget.settings;
+    final c = context.nym;
+    final controller = ref.read(nostrControllerProvider);
+    // Watch app state so new votes re-tally live.
+    final appState = ref.watch(appStateProvider);
+
+    final selfPubkey = appState.selfPubkey;
+    final isOwn = poll.pubkey == selfPubkey;
+    final hasVoted = poll.votes.containsKey(selfPubkey);
+    final votedIndex = hasVoted ? poll.votes[selfPubkey] : null;
+    final total = poll.totalVotes;
+    final fontSize = settings.textSize.toDouble();
+
+    final users = ref.watch(usersProvider);
+    final authorPic = users[poll.pubkey]?.profile?.picture;
+    // The live profile nym wins over the one frozen at ingest.
+    final baseNym = pickDisplayNym(users[poll.pubkey]?.nym, poll.nym);
+    final suffix = getPubkeySuffix(poll.pubkey);
+
+    // Clamp to now so polls never appear in the future.
+    var dt = DateTime.fromMillisecondsSinceEpoch(poll.createdAt * 1000);
+    final now = DateTime.now();
+    if (dt.isAfter(now)) dt = now;
+    final timeStr =
+        poll.createdAt > 0 ? formatTime(dt, settings.timeFormat) : '';
+    // '' selects the short-month default, since polls ignore the dateFormat setting.
+    final fullTimestamp = formatFullTimestamp(dt, settings.timeFormat, '');
+
+    // Only the gold aura applies to polls, not other special cosmetics.
+    final cosmetics = ref.watch(userCosmeticsProvider(poll.pubkey));
+    final styleDeco =
+        messageStyleDecoration(cosmetics.styleId, isLight: c.isLight);
+    final supporterDeco = cosmetics.supporter
+        ? (c.isLight ? supporterStyleDecorationLight : supporterStyleDecoration)
+        : null;
+    final goldAura = cosmetics.cosmetics.contains('cosmetic-aura-gold')
+        ? cosmeticAuraFor('cosmetic-aura-gold', isLight: c.isLight)
+        : null;
+
+    // Self tint and accent bar, hover replaces the flat fill, and supporter/gold gradients win over both.
+    Color? bg;
+    Color? barColor;
+    if (isOwn) {
+      bg = c.secondaryA(0.05);
+      barColor = c.isLight
+          ? const Color(0x40000000)
+          : const Color(0x4DFFFFFF);
+    }
+    if (_hovered) {
+      bg = c.isLight
+          ? Colors.black.withValues(alpha: 0.03)
+          : Colors.white.withValues(alpha: 0.03);
+    }
+    List<Color>? bgGradient;
+    if (supporterDeco != null) {
+      barColor = supporterDeco.borderAccent ?? barColor;
+      bgGradient = supporterDeco.backgroundGradient ?? bgGradient;
+    }
+    if (goldAura != null) {
+      barColor = goldAura.borderAccent ?? barColor;
+      bgGradient = goldAura.gradient ?? bgGradient;
+    }
+    final rowRing = goldAura?.insetColor;
+    final glowBlur = goldAura?.glowBlurFor(bubble: false) ?? 0;
+
+    // Self uses primary, bitchat theme a per-user hue, else secondary; Genesis flair bolds.
+    final bitchat = (!isOwn && settings.theme == NymThemeKey.bitchat)
+        ? bitchatUserColor(poll.pubkey, isLight: c.isLight)
+        : null;
+    final authorColor = isOwn ? c.primary : (bitchat ?? c.secondary);
+    final authorStyle = TextStyle(
+      color: authorColor,
+      fontSize: fontSize,
+      fontWeight:
+          hasGenesisFlair(cosmetics) ? FontWeight.w700 : FontWeight.w600,
+      letterSpacing: 0.2,
+    );
+    final isVerified = controller.isVerifiedDeveloper(poll.pubkey) ||
+        controller.isVerifiedBot(poll.pubkey);
+    final brackets = !settings.useBubbles;
+
+    // Order: avatar, `<`, nym#suffix, flair, verified, supporter, `>`.
+    final authorLine = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _openAuthorMenu(context, selfPubkey),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          NymAvatar(seed: poll.pubkey, size: 18, imageUrl: authorPic),
+          const SizedBox(width: 4),
+          if (brackets)
+            Text('<', style: TextStyle(color: authorColor, fontSize: fontSize)),
+          Flexible(
+            child: NymLabel(baseNym,
+                suffix: suffix,
+                style: authorStyle,
+                genesis: hasGenesisFlair(cosmetics)),
+          ),
+          if (cosmetics.flairId != null && cosmetics.flairId!.isNotEmpty)
+            FlairBadge(
+              flairId: cosmetics.flairId!,
+              edition: cosmetics.flairId == 'flair-genesis'
+                  ? cosmetics.genesisEdition
+                  : null,
+              size: 20,
+            ),
+          if (isVerified) ...[
+            const SizedBox(width: 4),
+            const VerifiedBadge(size: 20),
+          ],
+          if (cosmetics.supporter) const SupporterBadge(height: 20),
+          if (brackets)
+            Text('>', style: TextStyle(color: authorColor, fontSize: fontSize)),
+        ],
+      ),
+    );
+
+    final pollContainer = Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: c.isLight
+            ? const Color(0x08000000)
+            : Colors.white.withValues(alpha: 0.04),
+        border: Border.all(color: c.glassBorder),
+        borderRadius: NymRadius.rmd,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              tr('📊 POLL'),
+              style: TextStyle(
+                color: c.textDim,
+                fontSize: 11,
+                letterSpacing: 1,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 14),
+            child: Text(
+              poll.question,
+              style: TextStyle(
+                color: c.textBright,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                height: 1.4,
+              ),
+            ),
+          ),
+          for (var i = 0; i < poll.options.length; i++) ...[
+            if (i > 0) const SizedBox(height: 8),
+            PollOptionTile(
+              poll: poll,
+              option: poll.options[i],
+              total: total,
+              selected: votedIndex == poll.options[i].index,
+              avatarFor: (pk) => users[pk]?.profile?.picture,
+              onTap: hasVoted
+                  ? null
+                  : () => controller.votePoll(poll.id, poll.options[i].index),
+            ),
+          ],
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: PollVotesFooter(
+              total: total,
+              onTap: (rect) => _showVoters(context, rect),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    // Style tint on the content box; the poll's 8px margin sits outside it.
+    final styleBg = styleDeco?.contentBackgroundFor(bubble: false);
+    Widget content = ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 400),
+      child: styleBg != null
+          ? DecoratedBox(
+              decoration: BoxDecoration(color: styleBg),
+              child: pollContainer,
+            )
+          : pollContainer,
+    );
+    content = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: content,
+    );
+
+    // DOM order: time, author, content.
+    final messageRow = Wrap(
+      crossAxisAlignment: WrapCrossAlignment.start,
+      spacing: 10, // `.message { gap: 10px }`
+      runSpacing: 4,
+      children: [
+        if (settings.showTimestamps && timeStr.isNotEmpty)
+          ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 50),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _PollTimestampText(
+                  label: timeStr,
+                  fullTimestamp: fullTimestamp,
+                  fontSize: 12,
+                ),
+              ],
+            ),
+          ),
+        ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 120, maxWidth: 320),
+          child: authorLine,
+        ),
+        content,
+      ],
+    );
+
+    final rowChildren = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        messageRow,
+        // Appended after the content so it spans the full row width.
+        if (_showTranslation)
+          _PollTranslation(
+            key: ValueKey(_translateLangOverride ?? ''),
+            poll: poll,
+            targetLang: _translateLangOverride,
+          ),
+      ],
+    );
+
+    final watermark = styleDeco?.watermark;
+    final body = Padding(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      child: watermark != null
+          ? Stack(
+              children: [
+                Positioned.fill(
+                    child: StyleWatermarkLayer(watermark: watermark)),
+                rowChildren,
+              ],
+            )
+          : rowChildren,
+    );
+
+    final hasBg = bg != null || bgGradient != null;
+    Widget row = Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: bgGradient == null ? bg : null,
+        gradient: bgGradient != null
+            ? LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: bgGradient,
+              )
+            : null,
+        borderRadius: (hasBg || rowRing != null) ? NymRadius.rsm : null,
+        // Gold aura inset ring approximated as a 1px border.
+        border: rowRing != null ? Border.all(color: rowRing, width: 1) : null,
+        boxShadow: (goldAura?.glowColor != null && glowBlur > 0)
+            ? [BoxShadow(color: goldAura!.glowColor!, blurRadius: glowBlur)]
+            : null,
+      ),
+      clipBehavior: hasBg ? Clip.antiAlias : Clip.none,
+      child: barColor != null
+          ? Stack(
+              children: [
+                body,
+                // 3px rounded accent bar at ~60% height, vertically centered.
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: FractionallySizedBox(
+                      heightFactor: 0.6,
+                      child: Container(
+                        width: 3,
+                        decoration: BoxDecoration(
+                          color: barColor,
+                          borderRadius: const BorderRadius.only(
+                            topRight: Radius.circular(3),
+                            bottomRight: Radius.circular(3),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : body,
+    );
+
+    // Non-touch devices track hover and show react/translate buttons; polls skip the event-id gate.
+    if (PointerInput.mouseOf(context)) {
+      final withButtons =
+          MediaQuery.of(context).size.width > NymDimens.mobileBreakpoint;
+      Widget hoverChild = row;
+      if (withButtons) {
+        hoverChild = Stack(
+          clipBehavior: Clip.none,
+          children: [
+            row,
+            Positioned(
+              top: 5,
+              right: 10,
+              child: IgnorePointer(
+                ignoring: !_hovered,
+                child: AnimatedOpacity(
+                  opacity: _hovered ? 1 : 0,
+                  duration: NymMotion.transition,
+                  curve: NymMotion.curve,
+                  child: _PollHoverButtons(
+                    onReact: () => _openReactionPicker(context),
+                    onTranslate: () => setState(() => _showTranslation = true),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      }
+      row = MouseRegion(
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: hoverChild,
+      );
+    }
+    return row;
+  }
+
+  /// Opens the user context menu for the author with the poll body; its Translate renders inline.
+  void _openAuthorMenu(BuildContext context, String selfPubkey) {
+    final poll = widget.poll;
+    final isBot = ref.read(nostrControllerProvider).isVerifiedBot(poll.pubkey);
+    ContextMenuPanel.show(
+      context,
+      target: CtxTarget(
+        pubkey: poll.pubkey,
+        nym: pickDisplayNym(
+            ref.read(appStateProvider).users[poll.pubkey]?.nym, poll.nym),
+        isSelf: poll.pubkey == selfPubkey,
+        content: '[Poll] ${poll.question}',
+        messageId: poll.id,
+        isBot: isBot,
+      ),
+      onTranslateInline: (lang) => setState(() {
+        _translateLangOverride = lang;
+        _showTranslation = true;
+      }),
+    );
+  }
+
+  /// Reaction picker targeting the poll; kind inference falls back to the active view.
+  void _openReactionPicker(BuildContext context) {
+    final poll = widget.poll;
+    final selfPubkey = ref.read(appStateProvider).selfPubkey;
+    showReactionPicker(
+      context,
+      ref,
+      Message(
+        id: poll.id,
+        author: pickDisplayNym(
+            ref.read(appStateProvider).users[poll.pubkey]?.nym, poll.nym),
+        pubkey: poll.pubkey,
+        content: poll.question,
+        createdAt: poll.createdAt,
+        isOwn: poll.pubkey == selfPubkey,
+      ),
+    );
+  }
+
+  void _showVoters(BuildContext context, Rect anchorRect) {
+    final poll = widget.poll;
+    // No-op without votes.
+    if (poll.votes.isEmpty) return;
+    final selfPubkey = ref.read(appStateProvider).selfPubkey;
+    final controller = ref.read(nostrControllerProvider);
+    showPollVotersModal(
+      context,
+      anchorRect: anchorRect,
+      poll: poll,
+      selfPubkey: selfPubkey,
+      // Tapping a voter opens a PM; self rows just close.
+      onOpenPM: (pk) => controller.startPM(pk),
+    );
+  }
+}
+
+/// Hover reaction and translate buttons at the row's top-right.
+class _PollHoverButtons extends StatelessWidget {
+  const _PollHoverButtons({required this.onReact, required this.onTranslate});
+
+  final VoidCallback onReact;
+  final VoidCallback onTranslate;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _PollHoverActionButton(svg: NymIcons.addReaction, onTap: onReact),
+        const SizedBox(width: 4),
+        _PollHoverActionButton(
+          svg: NymIcons.translate,
+          onTap: onTranslate,
+          tooltip: tr('Translate'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Hover action button; light mode uses a white@0.85 fill and black@0.08 border.
+class _PollHoverActionButton extends StatefulWidget {
+  const _PollHoverActionButton({
+    required this.svg,
+    required this.onTap,
+    this.tooltip,
+  });
+  final String svg;
+  final VoidCallback onTap;
+  final String? tooltip;
+
+  @override
+  State<_PollHoverActionButton> createState() => _PollHoverActionButtonState();
+}
+
+class _PollHoverActionButtonState extends State<_PollHoverActionButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final restFill = c.isLight
+        ? const Color(0xD9FFFFFF)
+        : const Color(0xCC141423);
+    final restBorder =
+        c.isLight ? Colors.black.withValues(alpha: 0.08) : c.glassBorder;
+    final btn = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: _hover ? Colors.white.withValues(alpha: 0.08) : restFill,
+            borderRadius: NymRadius.rxs,
+            border: Border.all(color: _hover ? c.primaryA(0.3) : restBorder),
+          ),
+          child: NymSvgIcon(widget.svg, size: 16, color: c.text),
+        ),
+      ),
+    );
+    return widget.tooltip != null
+        ? NymTooltip(message: widget.tooltip!, child: btn)
+        : btn;
+  }
+}
+
+/// Tappable timestamp with a hover tooltip and an anchored full-timestamp popup.
+class _PollTimestampText extends StatefulWidget {
+  const _PollTimestampText({
+    required this.label,
+    required this.fullTimestamp,
+    required this.fontSize,
+  });
+
+  final String label;
+  final String fullTimestamp;
+  final double fontSize;
+
+  @override
+  State<_PollTimestampText> createState() => _PollTimestampTextState();
+}
+
+class _PollTimestampTextState extends State<_PollTimestampText> {
+  bool _hover = false;
+  OverlayEntry? _popup;
+
+  @override
+  void dispose() {
+    _popup?.remove();
+    _popup = null;
+    super.dispose();
+  }
+
+  void _closePopup() {
+    _popup?.remove();
+    _popup = null;
+  }
+
+  /// Right-aligned to the timestamp, 6px above with head-room, else below.
+  void _openPopup() {
+    _closePopup();
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final rect = box.localToGlobal(Offset.zero) & box.size;
+    final overlay = Overlay.of(context);
+    final entry = OverlayEntry(
+      builder: (ctx) {
+        final c = ctx.nym;
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closePopup,
+                onPanStart: (_) => _closePopup(),
+              ),
+            ),
+            AnchoredPopup(
+              anchor: rect,
+              align: PopupAlign.end,
+              child: Material(
+                type: MaterialType.transparency,
+                child: Container(
+                  constraints:
+                      const BoxConstraints(minWidth: 160, maxWidth: 240),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: c.bgSecondary,
+                    borderRadius: NymRadius.rmd,
+                    border: Border.all(
+                      color: c.isLight
+                          ? Colors.black.withValues(alpha: 0.08)
+                          : c.glassBorder,
+                    ),
+                    boxShadow: c.isLight
+                        ? const [
+                            BoxShadow(
+                                color: Color(0x1F000000),
+                                offset: Offset(0, 8),
+                                blurRadius: 32),
+                          ]
+                        : [
+                            const BoxShadow(
+                                color: Color(0x80000000),
+                                offset: Offset(0, 8),
+                                blurRadius: 32),
+                            BoxShadow(color: c.primaryA(0.1), blurRadius: 20),
+                            const BoxShadow(
+                                color: Color(0x0DFFFFFF), spreadRadius: 1),
+                          ],
+                  ),
+                  child: Text(
+                    widget.fullTimestamp,
+                    softWrap: false,
+                    style: TextStyle(color: c.text, fontSize: 13),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    _popup = entry;
+    overlay.insert(entry);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _openPopup,
+        child: NymTooltip(
+          message: widget.fullTimestamp,
+          triggerMode: TooltipTriggerMode.manual,
+          waitDuration: Duration.zero,
+          preferBelow: false,
+          verticalOffset: 14,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: c.isLight
+                ? const Color(0xEBFFFFFF)
+                : const Color(0xE6141423),
+            borderRadius: NymRadius.rxs,
+            border: Border.all(
+              color: c.isLight
+                  ? Colors.black.withValues(alpha: 0.08)
+                  : c.glassBorder,
+            ),
+            boxShadow: const [
+              BoxShadow(
+                  color: Color(0x4D000000),
+                  offset: Offset(0, 2),
+                  blurRadius: 8),
+            ],
+          ),
+          textStyle:
+              TextStyle(fontSize: 11, color: c.isLight ? c.text : c.textDim),
+          child: AnimatedDefaultTextStyle(
+            duration: const Duration(milliseconds: 120),
+            curve: Curves.ease,
+            style: TextStyle(
+              color: _hover ? c.primary : c.textDim,
+              fontSize: widget.fontSize,
+            ),
+            child: Text(widget.label),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Option row: bar animating to `pct%` over 400ms, text and `NN%`, and up to 8 voter avatars; hover beats the selected fill.
+class PollOptionTile extends StatefulWidget {
+  const PollOptionTile({
+    super.key,
+    required this.poll,
+    required this.option,
+    required this.total,
+    required this.selected,
+    required this.avatarFor,
+    required this.onTap,
+  });
+
+  final Poll poll;
+  final PollOption option;
+  final int total;
+  final bool selected;
+  final String? Function(String pubkey) avatarFor;
+  final VoidCallback? onTap;
+
+  @override
+  State<PollOptionTile> createState() => _PollOptionState();
+}
+
+class _PollOptionState extends State<PollOptionTile> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final poll = widget.poll;
+    final option = widget.option;
+    final selected = widget.selected;
+    final count = poll.votesFor(option.index);
+    final pct = widget.total > 0 ? ((count / widget.total) * 100).round() : 0;
+    final voters =
+        poll.votes.entries.where((e) => e.value == option.index).toList();
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          decoration: BoxDecoration(
+            // Hover specificity beats the selected fill.
+            color: _hover
+                ? (c.isLight
+                    ? const Color(0x0A000000)
+                    : Colors.white.withValues(alpha: 0.03))
+                : (selected
+                    ? Colors.white.withValues(alpha: 0.06)
+                    : Colors.transparent),
+            border: Border.all(
+                color: (_hover || selected) ? c.primary : c.glassBorder),
+            borderRadius: NymRadius.rsm,
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: AnimatedFractionallySizedBox(
+                  duration: const Duration(milliseconds: 400),
+                  curve: Curves.ease,
+                  alignment: Alignment.centerLeft,
+                  widthFactor: (pct / 100.0).clamp(0.0, 1.0),
+                  heightFactor: 1,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: NymRadius.rsm,
+                      // Light mode uses a black bar and a blue selected tint.
+                      gradient: LinearGradient(
+                        begin: Alignment.centerLeft,
+                        end: Alignment.centerRight,
+                        colors: selected
+                            ? (c.isLight
+                                ? const [Color(0x1F0064C8), Color(0x0A0064C8)]
+                                : [c.primaryA(0.15), c.primaryA(0.05)])
+                            : (c.isLight
+                                ? const [Color(0x0F000000), Color(0x05000000)]
+                                : [
+                                    Colors.white.withValues(alpha: 0.06),
+                                    Colors.white.withValues(alpha: 0.02),
+                                  ]),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            option.text,
+                            style: TextStyle(color: c.text, fontSize: 13),
+                          ),
+                        ),
+                        if (widget.total > 0)
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(minWidth: 35),
+                            child: Text(
+                              '$pct%',
+                              textAlign: TextAlign.right,
+                              style: TextStyle(
+                                color: c.textDim,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    // Always reserves the voter strip, even with no votes.
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Container(
+                        constraints: const BoxConstraints(minHeight: 20),
+                        alignment: Alignment.centerLeft,
+                        child: _VoterStack(
+                          voters: voters.map((e) => e.key).toList(),
+                          avatarFor: widget.avatarFor,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Up to 8 20px avatars plus "+N".
+class _VoterStack extends StatelessWidget {
+  const _VoterStack({required this.voters, required this.avatarFor});
+  final List<String> voters;
+  final String? Function(String pubkey) avatarFor;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final visible = voters.take(8).toList();
+    final extra = voters.length - visible.length;
+    return Wrap(
+      spacing: 2,
+      runSpacing: 2,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        for (final pk in visible)
+          Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: c.glassBorder),
+            ),
+            child: NymAvatar(seed: pk, size: 20, imageUrl: avatarFor(pk)),
+          ),
+        if (extra > 0)
+          Padding(
+            padding: const EdgeInsets.only(left: 2),
+            child: Text(
+              '+$extra',
+              style: TextStyle(color: c.textDim, fontSize: 10),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Raw "N vote(s)" count (no abbreviation) that becomes a pill on hover; tapping opens the voters list.
+class PollVotesFooter extends StatefulWidget {
+  const PollVotesFooter(
+      {super.key, required this.total, required this.onTap});
+  final int total;
+  final ValueChanged<Rect> onTap;
+
+  @override
+  State<PollVotesFooter> createState() => _PollFooterState();
+}
+
+class _PollFooterState extends State<PollVotesFooter> {
+  bool _hover = false;
+
+  void _handleTap() {
+    final box = context.findRenderObject() as RenderBox?;
+    final rect = (box != null && box.hasSize)
+        ? box.localToGlobal(Offset.zero) & box.size
+        : Rect.zero;
+    widget.onTap(rect);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    // Raw integer, pluralized.
+    final label =
+        widget.total == 1 ? tr('1 vote') : tr('{n} votes', {'n': widget.total});
+    return Transform.translate(
+      offset: const Offset(-6, 0),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: _handleTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.ease,
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: _hover
+                  ? Colors.white.withValues(alpha: 0.06)
+                  : Colors.transparent,
+              borderRadius: NymRadius.rxs,
+            ),
+            child: AnimatedDefaultTextStyle(
+              duration: const Duration(milliseconds: 150),
+              curve: Curves.ease,
+              style: TextStyle(
+                color: _hover ? c.text : c.textDim,
+                fontSize: 11,
+              ),
+              child: Text(label),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Max voter rows before the "+N more" line.
+const int _kPollVotersMaxRows = 100;
+
+/// Voters popup left-aligned to the footer (10px from edges), above if it fits, else below; outside tap dismisses.
+void showPollVotersModal(
+  BuildContext context, {
+  required Rect anchorRect,
+  required Poll poll,
+  required String selfPubkey,
+  required void Function(String pubkey) onOpenPM,
+}) {
+  final overlay = Overlay.of(context, rootOverlay: true);
+  late OverlayEntry entry;
+
+  void close() {
+    if (entry.mounted) entry.remove();
+  }
+
+  entry = OverlayEntry(
+    builder: (ctx) => Stack(
+      children: [
+        // Outside-tap scrim.
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: close,
+          ),
+        ),
+        AnchoredPopup(
+          anchor: anchorRect,
+          child: _PollVotersModal(
+            poll: poll,
+            selfPubkey: selfPubkey,
+            onTapRow: (pk) {
+              close();
+              if (pk != selfPubkey) onOpenPM(pk);
+            },
+          ),
+        ),
+      ],
+    ),
+  );
+  overlay.insert(entry);
+}
+
+/// Voters list with count, "you" chip and each voter's choice, capped at 100 rows; nyms resolve live.
+class _PollVotersModal extends ConsumerWidget {
+  const _PollVotersModal({
+    required this.poll,
+    required this.selfPubkey,
+    required this.onTapRow,
+  });
+
+  final Poll poll;
+  final String selfPubkey;
+  final void Function(String pubkey) onTapRow;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.nym;
+    final users = ref.watch(usersProvider);
+    final optionLabel = {for (final o in poll.options) o.index: o.text};
+    final entries = poll.votes.entries.toList();
+    final shown = entries.take(_kPollVotersMaxRows).toList();
+    final overflow = entries.length - shown.length;
+    final borderColor =
+        c.isLight ? Colors.black.withValues(alpha: 0.08) : c.glassBorder;
+
+    return Material(
+      type: MaterialType.transparency,
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 160, maxWidth: 240),
+        decoration: BoxDecoration(
+          color: c.bgSecondary,
+          border: Border.all(color: borderColor),
+          borderRadius: NymRadius.rmd,
+          boxShadow: c.isLight
+              ? const [
+                  BoxShadow(
+                      color: Color(0x1F000000),
+                      offset: Offset(0, 8),
+                      blurRadius: 32),
+                ]
+              : [
+                  const BoxShadow(
+                      color: Color(0x80000000),
+                      offset: Offset(0, 8),
+                      blurRadius: 32),
+                  BoxShadow(color: c.primaryA(0.1), blurRadius: 20),
+                  const BoxShadow(color: Color(0x0DFFFFFF), spreadRadius: 1),
+                ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                border: Border(bottom: BorderSide(color: borderColor)),
+              ),
+              child: Row(
+                children: [
+                  Text(
+                    tr('📊 Voters'),
+                    style: TextStyle(fontSize: 16, color: c.text),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${poll.votes.length}',
+                    style: TextStyle(fontSize: 12, color: c.textDim),
+                  ),
+                ],
+              ),
+            ),
+            Flexible(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child: ListView(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  shrinkWrap: true,
+                  children: [
+                    for (final e in shown)
+                      _row(
+                        context,
+                        users,
+                        e.key,
+                        optionLabel[e.value] ??
+                            tr('Option {n}', {'n': e.value + 1}),
+                      ),
+                    if (overflow > 0)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 8),
+                        child: Text(
+                          tr('+{n} more', {'n': overflow}),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: c.textDim,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Voter row: avatar, ellipsized nym, optional "you" chip, and the choice pill (max 140px).
+  Widget _row(
+    BuildContext context,
+    Map<String, User> users,
+    String pk,
+    String choice,
+  ) {
+    final c = context.nym;
+    final isYou = pk == selfPubkey;
+    final nym = pickDisplayNym(users[pk]?.nym, null);
+    final suffix = getPubkeySuffix(pk);
+    return InkWell(
+      onTap: () => onTapRow(pk),
+      hoverColor: c.isLight
+          ? Colors.black.withValues(alpha: 0.05)
+          : Colors.white.withValues(alpha: 0.06),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Row(
+          children: [
+            NymAvatar(
+                seed: pk, size: 18, imageUrl: users[pk]?.profile?.picture),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: NymLabel(
+                  nym,
+                  suffix: suffix,
+                  style: TextStyle(fontSize: 13, color: c.text),
+                ),
+              ),
+            ),
+            if (isYou) ...[
+              const SizedBox(width: 6),
+              Text(
+                tr('you'),
+                style: TextStyle(
+                  fontSize: 10,
+                  color: c.primary.withValues(alpha: 0.7),
+                ),
+              ),
+            ],
+            const SizedBox(width: 6),
+            Container(
+              constraints: const BoxConstraints(maxWidth: 140),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.06),
+                borderRadius: NymRadius.rxs,
+              ),
+              child: Text(
+                choice,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13 * 0.85, color: c.textDim),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Inline poll translation of question and options, styled like [MessageTranslation].
+class _PollTranslation extends ConsumerStatefulWidget {
+  const _PollTranslation({super.key, required this.poll, this.targetLang});
+
+  final Poll poll;
+
+  /// Override target language; defaults to `settings.translateLanguage`.
+  final String? targetLang;
+
+  @override
+  ConsumerState<_PollTranslation> createState() => _PollTranslationState();
+}
+
+class _PollTranslationState extends ConsumerState<_PollTranslation> {
+  final TranslateService _service = TranslateService();
+  late final List<String> _segments;
+  late final Future<List<TranslationResult>> _future;
+
+  String get _target =>
+      widget.targetLang ?? ref.read(settingsProvider).translateLanguage;
+
+  @override
+  void initState() {
+    super.initState();
+    // The question followed by each option's text.
+    _segments = [
+      widget.poll.question,
+      for (final o in widget.poll.options) o.text,
+    ];
+    final target = _target.isEmpty ? 'en' : _target;
+    _future = Future.wait(
+      _segments.map((s) => _service.translate(s, target)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        border: Border(left: BorderSide(color: c.primary, width: 3)),
+        borderRadius: const BorderRadius.only(
+          topRight: Radius.circular(NymRadius.xs),
+          bottomRight: Radius.circular(NymRadius.xs),
+        ),
+      ),
+      child: FutureBuilder<List<TranslationResult>>(
+        future: _future,
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            // Static italic, no pulse.
+            return Text(
+              tr('Translating...'),
+              style: TextStyle(
+                color: c.textDim.withValues(alpha: 0.6),
+                fontStyle: FontStyle.italic,
+                fontSize: 13,
+              ),
+            );
+          }
+          if (snap.hasError) {
+            return Text(
+              tr('Translation failed'),
+              style: TextStyle(color: c.danger, fontSize: 12),
+            );
+          }
+          final results = snap.data!;
+          final translated = [
+            for (final r in results) r.translatedText,
+          ];
+          // Every segment came back blank or unchanged.
+          final allNoop = () {
+            for (var i = 0; i < _segments.length; i++) {
+              final t = (i < translated.length ? translated[i] : '').trim();
+              if (t.isNotEmpty && t != _segments[i].trim()) return false;
+            }
+            return true;
+          }();
+          if (allNoop) {
+            return Text.rich(
+              TextSpan(children: [
+                const TextSpan(text: '🌐 '),
+                TextSpan(
+                  text: tr('Already in {lang} (nothing to translate)',
+                      {'lang': languageName(_target)}),
+                  style: TextStyle(color: c.danger, fontSize: 13 * 0.85),
+                ),
+              ]),
+            );
+          }
+          // First non-`auto` detected language wins.
+          var detected = 'auto';
+          for (final r in results) {
+            if (r.detectedLanguage.isNotEmpty && r.detectedLanguage != 'auto') {
+              detected = r.detectedLanguage;
+              break;
+            }
+          }
+          final showLang = detected != 'auto' && detected != _target;
+          final question = translated.isNotEmpty && translated[0].isNotEmpty
+              ? translated[0]
+              : widget.poll.question;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text.rich(
+                TextSpan(
+                  style: TextStyle(color: c.textDim, fontSize: 13, height: 1.4),
+                  children: [
+                    const TextSpan(text: '🌐 '),
+                    TextSpan(
+                      text: question,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
+              for (var i = 0; i < widget.poll.options.length; i++)
+                Text(
+                  '• ${(i + 1 < translated.length && translated[i + 1].isNotEmpty) ? translated[i + 1] : widget.poll.options[i].text}',
+                  style: TextStyle(
+                    color: c.textDim.withValues(alpha: 0.9),
+                    fontSize: 13 * 0.95,
+                    height: 1.4,
+                  ),
+                ),
+              if (showLang)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    '${languageName(detected)} → ${languageName(_target)}',
+                    style: TextStyle(
+                      color: c.textDim.withValues(alpha: 0.7),
+                      fontSize: 13 * 0.8,
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}

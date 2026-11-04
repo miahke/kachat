@@ -1,0 +1,24 @@
+.DS_Store
+**/.DS_Store
+.DS_Store
+node_modules/
+.DS_Store
+dist/
+
+# Generated Flutter/Android files and local credentials
+flutter/.dart_tool/
+flutter/.flutter-plugins-dependencies
+flutter/build/
+flutter/android/.gradle/
+flutter/android/local.properties
+flutter/android/key.properties
+flutter/android/fcm.properties
+*.jks
+*.keystore
+flutter/android/.kotlin/
+
+# Local publication/tool outputs
+/build/
+.env
+.env.local
+**/__pycache__/

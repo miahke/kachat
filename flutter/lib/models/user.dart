@@ -1,0 +1,152 @@
+import '../features/pms/last_seen.dart';
+
+enum UserStatus { online, away, offline, hidden }
+
+UserStatus userStatusFromString(String? s) {
+  switch (s) {
+    case 'online':
+      return UserStatus.online;
+    case 'away':
+      return UserStatus.away;
+    case 'hidden':
+      return UserStatus.hidden;
+    default:
+      return UserStatus.offline;
+  }
+}
+
+/// Active-presence threshold in ms.
+const int kActiveThresholdMs = kLastSeenActiveMs;
+
+/// A seen user merged with kind-0 profile data.
+class User {
+  User({
+    required this.pubkey,
+    this.nym = '',
+    this.lastSeen = 0,
+    this.status = UserStatus.offline,
+    Set<String>? channels,
+    this.profile,
+    this.awayMessage,
+    this.shopStyle,
+    this.shopFlair,
+    this.isSupporter = false,
+    List<String>? shopCosmetics,
+    this.shopEdition,
+  })  : channels = channels ?? <String>{},
+        shopCosmetics = shopCosmetics ?? const <String>[];
+
+  final String pubkey;
+  String nym;
+
+  /// Last activity, ms since epoch.
+  int lastSeen;
+  UserStatus status;
+
+  final Set<String> channels;
+
+  final Map<String, int> channelSeen = <String, int>{};
+
+  void noteChannelSeen(String key, int atMs, int nowMs) {
+    channelSeen.removeWhere((_, at) => !lastSeenIsActive(at, nowMs));
+    final at = atMs < nowMs ? atMs : nowMs;
+    if (key.isEmpty || !lastSeenIsActive(at, nowMs)) return;
+    final k = key.toLowerCase();
+    if (at > (channelSeen[k] ?? 0)) channelSeen[k] = at;
+  }
+
+  bool seenIn(String key, int nowMs) =>
+      lastSeenIsActive(channelSeen[key.toLowerCase()] ?? 0, nowMs);
+
+  final Set<String> postedIn = <String>{};
+
+  bool onlineIn(String key, int nowMs) {
+    if (seenIn(key, nowMs)) return true;
+    return postedIn.contains(key.toLowerCase()) &&
+        lastSeenIsActive(lastSeen, nowMs);
+  }
+
+  UserProfile? profile;
+  String? awayMessage;
+
+  /// Other users' active shop cosmetics from presence; self reads the shop controller.
+  String? shopStyle; // Active message-style item id.
+  String? shopFlair; // Active nickname-flair item id.
+  bool isSupporter; // Owns the supporter badge.
+
+  /// Other users' active special-cosmetic item ids; self reads the shop controller.
+  List<String> shopCosmetics;
+
+  /// Numbered-flair edition for other users; null when unknown.
+  int? shopEdition;
+
+  /// Effective status; a verified bot is always online unless hidden, as in the PWA.
+  UserStatus effectiveStatus({int? nowMs, bool isVerifiedBot = false}) {
+    if (status == UserStatus.hidden) return UserStatus.hidden;
+    if (isVerifiedBot) return UserStatus.online;
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    if (awayMessage != null && awayMessage!.isNotEmpty) return UserStatus.away;
+    if (status == UserStatus.away) return UserStatus.away;
+    if (lastSeenIsActive(lastSeen, now)) return UserStatus.online;
+    return UserStatus.offline;
+  }
+}
+
+class UserProfile {
+  UserProfile({
+    this.name,
+    this.username,
+    this.displayName,
+    this.about,
+    this.picture,
+    this.banner,
+    this.nip05,
+    this.lud16,
+    this.lud06,
+    this.kind0Ts = 0,
+  });
+
+  String? name;
+
+  /// Non-standard `username`, middle of the PWA chain `name || username || display_name`.
+  String? username;
+  String? displayName;
+  String? about;
+  String? picture;
+  String? banner;
+  String? nip05;
+  String? lud16;
+  String? lud06;
+
+  /// created_at (seconds) of the source kind-0 event.
+  int kind0Ts;
+
+  String? get lightningAddress => lud16 ?? lud06;
+
+  Map<String, dynamic> toJson() => {
+        if (name != null) 'name': name,
+        if (username != null) 'username': username,
+        if (displayName != null) 'display_name': displayName,
+        if (about != null) 'about': about,
+        if (picture != null) 'picture': picture,
+        if (banner != null) 'banner': banner,
+        if (nip05 != null) 'nip05': nip05,
+        if (lud16 != null) 'lud16': lud16,
+        if (lud06 != null) 'lud06': lud06,
+      };
+
+  factory UserProfile.fromJson(Map<String, dynamic> j, {int kind0Ts = 0}) {
+    return UserProfile(
+      name: j['name'] as String?,
+      username: j['username'] as String?,
+      displayName: j['display_name'] as String?,
+      about: j['about'] as String?,
+      picture: j['picture'] as String?,
+      banner: j['banner'] as String?,
+      nip05: j['nip05'] as String?,
+      lud16: j['lud16'] as String?,
+      lud06: j['lud06'] as String?,
+      kind0Ts: kind0Ts,
+    );
+  }
+}

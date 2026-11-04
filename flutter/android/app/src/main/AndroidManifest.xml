@@ -1,0 +1,227 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Core connectivity -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+
+    <!-- Geolocation for proximity channel sort (geolocator). Coarse + fine; the
+         fix is only read when the user enables "Sort by proximity". -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+
+    <!-- WebRTC audio/video calls + screenshare (flutter_webrtc),
+         camera (image_picker/mobile_scanner), microphone (calls/audio) -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <!-- WebRTC routes audio through Bluetooth headsets; new + legacy names -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+
+    <!-- Bluetooth LE mesh (bitchat-compatible): scan for and advertise the mesh
+         GATT service, and act as both central and peripheral. SCAN declares
+         neverForLocation since mesh discovery filters by service UUID and does
+         not derive device location. ADMIN/legacy names cover pre-Android-12. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
+
+    <!-- Keep the connection/call alive -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+
+    <!-- Foreground service for active calls + screen-capture (getDisplayMedia) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
+    <!-- "Stay Connected in Background": relay sockets (dataSync) and the BLE
+         mesh radio (connectedDevice) keep running while the app is off-screen.
+         Only used while that opt-in setting is on. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+
+    <!-- Notifications (local + future FCM). POST_NOTIFICATIONS needed on API 33+ -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <!-- Exact-alarm-free scheduling; receive boot for rescheduled notifications -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
+    <!-- Biometric / device-credential unlock (local_auth) -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>
+
+    <!-- Media access for image_picker / file_picker / gal (scoped storage).
+         API 33+ uses granular READ_MEDIA_*; legacy <=32 uses READ_EXTERNAL_STORAGE. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
+    <!-- gal: saving images/videos to the gallery on legacy API levels -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29"
+        tools:replace="android:maxSdkVersion"/>
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION"/>
+
+    <!-- Hardware features are optional so the app installs on devices lacking them -->
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
+    <uses-feature android:name="android.hardware.camera.any" android:required="false"
+        tools:replace="android:required"/>
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+    <uses-permission android:name="android.permission.NFC"/>
+    <uses-feature android:name="android.hardware.nfc" android:required="false"/>
+    <uses-feature android:name="android.hardware.nfc.hce" android:required="false"/>
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
+    <uses-feature android:name="android.hardware.location" android:required="false"/>
+    <uses-feature android:name="android.hardware.location.gps" android:required="false"/>
+    <uses-feature android:name="android.hardware.location.network" android:required="false"/>
+
+    <!-- Backups are fully disabled: Auto Backup would copy the sqflite message
+         store and SharedPreferences (message history, group membership,
+         contacts) to the user's Google account, and adb backup could extract
+         the same data locally. allowBackup=false disables both; the rule files
+         are belt-and-braces for agents that consult rules despite the flag.
+         Identity secrets already live in the Keystore. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <application
+        android:label="kachat"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="false"
+        android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true">
+        <activity android:name="com.panchat.qwdtt.VkLoginActivity" android:exported="false"/>
+        <service android:name="com.panchat.qwdtt.QwdttService" android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-selected local messaging proxy through VK TURN" />
+        </service>
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <meta-data
+                android:name="flutter_deeplinking_enabled"
+                android:value="false"/>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Custom scheme: nymchat://… (app_links / deep_links) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="nymchat"/>
+            </intent-filter>
+            <!-- Universal links: the hosts the deep-link parser recognizes
+                 (deep_links.dart kNymLinkHosts) + the served PWA host.
+                 autoVerify drives App Links against /.well-known/assetlinks.json. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="web.nymchat.app"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/*"/>
+            </intent-filter>
+            <!-- Share sheet: receive images/videos (single + multiple). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="image/*"/>
+                <data android:mimeType="video/*"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="image/*"/>
+                <data android:mimeType="video/*"/>
+            </intent-filter>
+        </activity>
+        <!-- "Stay Connected in Background" keep-alive. Not exported: only the
+             app itself starts or stops it. -->
+        <service
+            android:name=".NymBackgroundService"
+            android:exported="false"
+            android:stopWithTask="true"
+            android:foregroundServiceType="dataSync|connectedDevice"/>
+        <receiver
+            android:name=".NymCallActionReceiver"
+            android:exported="false"/>
+        <service
+            android:name=".fcm.NymRingMessagingService"
+            android:exported="false"
+            tools:ignore="MissingClass">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT"/>
+            </intent-filter>
+        </service>
+        <service
+            android:name=".NymCallService"
+            android:exported="false"
+            android:stopWithTask="true"
+            android:foregroundServiceType="microphone|camera"/>
+        <!-- Play Integrity: the Google Cloud project number verdicts are issued
+             under. A string resource, not a literal: the number overflows the
+             32-bit int aapt would otherwise parse it as, and PlayIntegrity.kt
+             reads it back with toLongOrNull(). -->
+        <meta-data
+            android:name="com.nym.bar.PLAY_INTEGRITY_PROJECT_NUMBER"
+            android:value="@string/play_integrity_project_number" />
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+        <service
+            android:name=".NymNdefHceService"
+            android:exported="true"
+            android:enabled="false"
+            android:permission="android.permission.BIND_NFC_SERVICE">
+            <intent-filter>
+                <action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.cardemulation.host_apdu_service"
+                android:resource="@xml/nym_ndef_apdu_service"/>
+        </service>
+    </application>
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- url_launcher: open a Lightning wallet via lightning: URIs (zaps/shop) -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="lightning"/>
+        </intent>
+        <!-- url_launcher: open external https links + share targets -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND"/>
+            <data android:mimeType="*/*"/>
+        </intent>
+    </queries>
+</manifest>
