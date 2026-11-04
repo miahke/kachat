@@ -34,3 +34,7 @@ Modified 2026-11-03: panchat NYM adds a user-selected qWDTT transport, local aut
 Modified 2026-11-04: Android fork branded kachat with the user-approved photo-to-glyph launcher artwork and a monochrome themed-icon layer. Original NYM attribution remains unchanged.
 
 Modified 2026-11-04: removed payment/store interfaces and execution paths, replaced original-publisher About panels with local app information, renamed color themes and optimized bounded chat groups, media I/O and qWDTT status metadata. NYM wire identifiers and original attribution are retained for interoperability.
+
+Modified 2026-11-04: reviewed and completed the Russian UI dictionary, made Russian UI localization offline and resistant to stale machine caches, added numeric/date/control localization and Russian Android notification resources, and clarified qWDTT field labels. Original attribution and protocol identifiers are retained.
+
+Modified 2026-11-04: integrated rebuilt Arti and obfs4/WebTunnel/Snowflake transports with bootstrap progress, persistent protected routing, applicable qWDTT settings/import/export, manual VK captcha handling and bounded lifecycle cleanup. Corresponding native sources, build instructions and component licenses are retained.

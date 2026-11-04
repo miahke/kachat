@@ -51,7 +51,7 @@ android {
         minSdk = 29
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         targetSdk = 36
-        versionCode = 878
+        versionCode = 879
         versionName = flutter.versionName
         
         // Support all ABIs - AGP 8.9.1 automatically handles 16 KB alignment
@@ -88,7 +88,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            keepDebugSymbols += ["**/libbitchat_vk.so"]
+            keepDebugSymbols += ["**/libbitchat_vk.so", "**/libbitchat_pt.so", "**/libarti_android.so"]
         }
     }
 }

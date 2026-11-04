@@ -1,0 +1,3 @@
+953833875a0294a1940e891d7ca6370467fd312fcc6402026fcccc2dbc91ec1b  flutter/android/app/src/main/jniLibs/arm64-v8a/libarti_android.so
+c6fad7046953d760efcd381c36ec7652529693406abdb8fc39c31874d0c1b073  flutter/android/app/src/main/jniLibs/armeabi-v7a/libarti_android.so
+a37c2a6a814982415453a22cb7c874fa65c0dcbf6b9ca8cf1a31d2221aa5bfbf  flutter/android/app/src/main/jniLibs/x86_64/libarti_android.so

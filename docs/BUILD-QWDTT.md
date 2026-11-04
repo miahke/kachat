@@ -23,7 +23,7 @@ JDK is selected automatically. Release signing remains configured via an
 untracked `android/key.properties` or `NYM_KEY_PROPERTIES`; never commit keys.
 This fork uses `com.panchat.nym` and installs beside stock NYM and old panchat.
 
-The prebuilt qWDTT executables are the existing panchat.3 GPL components;
+The prebuilt qWDTT executables include this fork’s manual captcha changes;
 SHA256 hashes are in `third_party/panchat-qwdtt/native-sha256.json` and sources
 in `native/qwdtt`. To rebuild with Go 1.27.3 and Android NDK r27d:
 
@@ -40,7 +40,7 @@ checksums and corresponding sources are bundled in
 
 ## User flow
 
-Open Settings → qWDTT → paste a `qwdtt://config?...` subscription, or create a
+Open Settings → Tor and qWDTT → qWDTT → paste a `qwdtt://config?...` subscription, or create a
 manual profile with a VPS and server password. Ready call hashes do not require
 VK login. Optional official VK login obtains a transport-scoped token for
 creating call hashes. Connect selects qWDTT persistently. Stop keeps the route
@@ -105,6 +105,12 @@ release assets and can contain development paths. Packaging uses split debug
 information to keep those paths out of the distributed Dart AOT libraries.
 
 For published artifacts, build from a neutral checkout path such as
-`/tmp/kachat-build-src/flutter`: Flutter can embed the generated plugin
+`/var/tmp/kachat-build-src/flutter`: Flutter can embed the generated plugin
 registrant URI even with split debug info. The test release is built there
 and scanned for local personal paths after packaging.
+
+## Tor and test release 2
+
+See `third_party/tor/README.md` for pinned Arti/PT sources and rebuilding all three ABIs. Native checksums are in `third_party/tor/SHA256SUMS`; run `tools/arti-build/verify-checksums.sh` from the repository root. Tor and qWDTT share one persistent route selector. Snowflake has a built-in public configuration; obfs4 and WebTunnel require the user’s bridge lines. No destination DNS is sent outside the selected SOCKS route. VK/TURN/Tor bootstrap, official login/captcha and explicit SSH remain independent service connections.
+
+Upstream qWDTT subscription `port` is the local SOCKS port; a remote port belongs in `peer=host:port` (default 56000). Re-import old subscriptions if the old importer misinterpreted this field; existing deliberately configured server ports are not silently rewritten. See `docs/qwdtt-settings-parity.md`.

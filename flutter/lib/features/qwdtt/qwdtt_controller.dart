@@ -4,8 +4,8 @@ import 'package:collection/collection.dart';
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 
 import 'routing_gateway.dart';
 
@@ -25,6 +25,126 @@ class QwdttController extends ChangeNotifier {
   bool _initialized = false;
   int _revision = 0;
   bool busy = false;
+  bool captchaPresenting = false;
+  String? _lastCaptchaId;
+  bool _disposed = false;
+  String probeState = 'idle';
+  String? probeMessage;
+  HttpClient? _probeClient;
+  String get route =>
+      _snapshot['route'] as String? ?? (selected ? 'VK' : 'DIRECT');
+  Map<String, dynamic> get tor =>
+      Map<String, dynamic>.from((_snapshot['tor'] as Map?) ?? {});
+  bool get captchaPending => route == 'VK' && _snapshot['captcha'] is Map;
+  String? get statusError => _snapshot['error'] as String?;
+
+  Future<Map<String, dynamic>> torSettings() async =>
+      await _channel.invokeMapMethod<String, dynamic>('torSettings') ?? {};
+  Future<String> exportProfile(String id) async {
+    final value = await _channel.invokeMethod<String>('export', {'id': id});
+    if (value == null || value.isEmpty) {
+      throw const FormatException('Export unavailable');
+    }
+    return value;
+  }
+
+  Future<void> solveCaptcha() async {
+    if (captchaPresenting || !captchaPending) return;
+    captchaPresenting = true;
+    _lastCaptchaId = (_snapshot['captcha'] as Map)['id'] as String?;
+    final revision = _revision;
+    notifyListeners();
+    try {
+      final value = await _channel.invokeMapMethod<String, dynamic>(
+        'solveCaptcha',
+      );
+      if (!_disposed && revision == _revision && value != null) _apply(value);
+    } on PlatformException catch (e) {
+      if (!_disposed && revision == _revision) {
+        final message = e.code == 'VK_CONFIRMATION'
+            ? e.message
+            : 'Проверка VK отменена или истекла. Повторите подключение.';
+        // A cancelled challenge must not open a fresh popup on every core retry.
+        _revision++;
+        _gateway?.block();
+        _routeKey = null;
+        try {
+          final stopped = await _channel.invokeMapMethod<String, dynamic>(
+            'disconnect',
+          );
+          if (!_disposed && stopped != null) _apply(stopped);
+        } catch (_) {
+          _snapshot = {
+            ..._snapshot,
+            'selected': true,
+            'state': 'STOPPED',
+            'captcha': null,
+          };
+        }
+        error = message;
+      }
+    } finally {
+      captchaPresenting = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  void _maybePresentCaptcha() {
+    if (!captchaPending || captchaPresenting || _disposed) return;
+    if ((_snapshot['captcha'] as Map)['id'] == _lastCaptchaId) return;
+    try {
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        return;
+      }
+    } catch (_) {
+      return;
+    }
+    unawaited(solveCaptcha());
+  }
+
+  Future<void> checkConnection() async {
+    if (probeState == 'checking') return;
+    final gateway = _gateway;
+    if (!selected || state != 'READY' || gateway == null) {
+      probeState = 'error';
+      probeMessage = 'Сначала подключите защищённый маршрут.';
+      notifyListeners();
+      return;
+    }
+    final revision = _revision;
+    final key = _routeKey;
+    probeState = 'checking';
+    probeMessage = 'Проверяем HTTPS через выбранный прокси…';
+    notifyListeners();
+    final client = QwdttHttpOverrides(gateway).createHttpClient(null)
+      ..connectionTimeout = const Duration(seconds: 12);
+    _probeClient = client;
+    try {
+      final request = await client
+          .headUrl(Uri.https('web.nymchat.app', '/'))
+          .timeout(const Duration(seconds: 15));
+      request.followRedirects = false;
+      final response = await request.close().timeout(
+        const Duration(seconds: 15),
+      );
+      await response.drain<void>().timeout(const Duration(seconds: 5));
+      if (!_disposed && revision == _revision && key == _routeKey) {
+        probeState = 'ok';
+        probeMessage =
+            'Сервер ответил через выбранный прокси (HTTPS, HTTP ${response.statusCode}). Доставка сообщений проверяется отдельно.';
+      }
+    } catch (_) {
+      if (!_disposed && revision == _revision && key == _routeKey) {
+        probeState = 'error';
+        probeMessage = 'Нет HTTPS-ответа через выбранный прокси. Проверьте туннель и доступность сервера.';
+      }
+    } finally {
+      client.close(force: true);
+      if (identical(_probeClient, client)) _probeClient = null;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
   String? error;
   final Set<FutureOr<void> Function()> _nativeRouteGuards = {};
   bool get selected => _snapshot['selected'] == true;
@@ -32,9 +152,15 @@ class QwdttController extends ChangeNotifier {
   bool get vkLoggedIn => _snapshot['vkLoggedIn'] == true;
   Future<dynamic> admin(String method, Map<String, dynamic> arguments) =>
       _channel.invokeMethod<dynamic>(method, arguments);
-  Future<String> generateHash() async {
+  Future<String>? _hashInFlight;
+  Future<String> generateHash() => _hashInFlight ??= _generateHash()
+      .whenComplete(() => _hashInFlight = null);
+
+  Future<String> _generateHash() async {
     final hash = await _channel.invokeMethod<String>('generateHash');
-    if (hash == null || hash.isEmpty) throw const FormatException('No hash');
+    if (hash == null || hash.isEmpty) {
+      throw const FormatException('VK не выдал хэш.');
+    }
     return hash;
   }
 
@@ -73,7 +199,7 @@ class QwdttController extends ChangeNotifier {
     } catch (_) {
       if (!busy && revision == _revision) {
         _snapshot = {'selected': true, 'state': 'ERROR'};
-        error = 'Настройки qWDTT недоступны; прямой выход заблокирован.';
+        error = 'Настройки сети недоступны; прямой выход заблокирован.';
       }
     }
     _poll = Timer.periodic(const Duration(seconds: 1), (_) => refresh());
@@ -101,6 +227,7 @@ class QwdttController extends ChangeNotifier {
   }
 
   void _apply(Map<String, dynamic> value) {
+    if (_disposed) return;
     // An absent or malformed selected flag never means permission to connect directly.
     if (value['selected'] is! bool) {
       throw const FormatException('Missing route selection');
@@ -114,6 +241,9 @@ class QwdttController extends ChangeNotifier {
         ? '${value['generation']}:${socks['port']}:${socks['username']}:${socks['password']}'
         : 'BLOCKED';
     if (_routeKey != key) {
+      _probeClient?.close(force: true);
+      probeState = 'idle';
+      probeMessage = null;
       if (selected) {
         for (final guard in _nativeRouteGuards.toList()) {
           unawaited(
@@ -141,6 +271,7 @@ class QwdttController extends ChangeNotifier {
       _routeKey = key;
     }
     if (changed) notifyListeners();
+    _maybePresentCaptcha();
   }
 
   Future<void> command(String method, [Map<String, dynamic>? arguments]) async {
@@ -150,16 +281,23 @@ class QwdttController extends ChangeNotifier {
     busy = true;
     error = null;
     final switching =
-        {'connect', 'disconnect', 'direct'}.contains(method) ||
+        {'connect', 'connectTor', 'disconnect', 'direct'}.contains(method) ||
         (method == 'delete' && arguments?['id'] == activeId);
     try {
       if (switching) {
         _gateway?.block();
         _routeKey = null;
-        if (method == 'connect') {
-          _snapshot = {..._snapshot, 'selected': true, 'state': 'STARTING'};
+        if (method == 'connect' || method == 'connectTor') {
+          _snapshot = {
+            ..._snapshot,
+            'selected': true,
+            'state': 'STARTING',
+            'route': method == 'connectTor' ? 'TOR' : 'VK',
+          };
           // Persist fail-closed selection before awaiting native connection teardown.
-          await _channel.invokeMethod<void>('select');
+          await _channel.invokeMethod<void>('select', {
+            'route': method == 'connectTor' ? 'TOR' : 'VK',
+          });
         }
         if (method != 'direct') {
           for (final guard in _nativeRouteGuards.toList()) {
@@ -172,17 +310,28 @@ class QwdttController extends ChangeNotifier {
         await _channel.invokeMapMethod<String, dynamic>(method, arguments) ??
             {},
       );
+    } on PlatformException catch (e) {
+      error =
+          const {
+            'VK_CONFIRMATION',
+            'TOR_BRIDGE',
+            'QWDTT_FAILED',
+          }.contains(e.code)
+          ? e.message
+          : 'Не удалось выполнить действие. Проверьте профиль и реквизиты.';
     } catch (_) {
       error = 'Не удалось выполнить действие. Проверьте профиль и реквизиты.';
-      await refresh();
     } finally {
       busy = false;
+      unawaited(refresh());
       notifyListeners();
     }
   }
 
   @override
   void dispose() {
+    _disposed = true;
+    _probeClient?.close(force: true);
     _poll?.cancel();
     unawaited(_gateway?.dispose());
     super.dispose();

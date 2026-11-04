@@ -149,6 +149,8 @@ func runCli() {
 			case line == "STOP":
 				cancel()
 				return
+			case strings.HasPrefix(line, "CAPTCHA_RESULT:") && mobileProtocolActive:
+				handleMobileCaptchaAnswer(strings.TrimPrefix(line, "CAPTCHA_RESULT:"))
 			case strings.HasPrefix(line, "CAPTCHA_RESULT|"):
 				result := strings.TrimPrefix(line, "CAPTCHA_RESULT|")
 				drainCaptchaResult()

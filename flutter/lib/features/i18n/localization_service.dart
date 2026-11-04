@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter/widgets.dart';
+import 'package:intl/intl.dart';
+import 'package:intl/date_symbol_data_local.dart';
 
 import '../../services/api/api_client.dart';
 import '../../services/api/api_config.dart';
@@ -11,9 +13,11 @@ import '../../services/storage/key_value_store.dart';
 import '../translate/translate_service.dart';
 import 'app_strings_catalog.dart';
 import 'catalog_key.dart';
+import 'russian_counts.dart';
 import '../../services/storage/storage_guard.dart';
 
-/// Runtime UI localization via the translate proxy; misses return English and repaint via [onChanged].
+/// Bundled UI localization; Russian uses reviewed assets only.
+/// Other languages retain the existing translation fallback for missing strings.
 class LocalizationService {
   LocalizationService._();
 
@@ -23,8 +27,10 @@ class LocalizationService {
   /// Per-language cache key prefix; the blob maps English source to translation.
   static const String _cachePrefix = 'nym_ui_i18n_';
 
-  static final String cacheVersion =
-      i18nCacheKey(i18nCatalogHash(kAppStringsCatalog), ApiConfig.appBuild);
+  static final String cacheVersion = i18nCacheKey(
+    i18nCatalogHash(kAppStringsCatalog),
+    ApiConfig.appBuild,
+  );
 
   KeyValueStore? _kv;
   TranslateService? _translator;
@@ -34,6 +40,9 @@ class LocalizationService {
   String get language => _lang;
 
   bool get isActive => _lang.isNotEmpty && _lang != 'en';
+
+  // The edited Russian pack must not be replaced by old or new machine output.
+  bool get _usesReviewedPack => _lang == 'ru';
 
   /// English source -> translation for the loaded [_lang].
   final Map<String, String> _cache = {};
@@ -92,9 +101,20 @@ class LocalizationService {
 
   /// Loads [code]'s cache and re-translates already-seen sources; `''`/`en` returns to English instantly.
   void setLanguage(String code) {
-    final next = code.trim();
+    final raw = code.trim();
+    final next = RegExp(r'^ru(?:[-_].*)?$', caseSensitive: false).hasMatch(raw)
+        ? 'ru'
+        : raw;
     if (next == _lang) return;
     _lang = next;
+    if (next == 'ru') {
+      // Bundled intl data is initialized synchronously; no network request.
+      unawaited(initializeDateFormatting('ru'));
+      Intl.defaultLocale = 'ru';
+    } else {
+      Intl.defaultLocale = 'en';
+    }
+    _debounce?.cancel();
     if (next.isNotEmpty && next != 'en') _pruneOtherCaches(next);
     _cache.clear();
     _requested.clear();
@@ -115,7 +135,9 @@ class LocalizationService {
     _packReady = _primeFromPack(next);
     // Re-translate anything already rendered so the switch is visible at once.
     for (final s in _seen) {
-      if (!_cache.containsKey(s) && sendable(s)) _pending.add(s);
+      if (!_usesReviewedPack && !_cache.containsKey(s) && sendable(s)) {
+        _pending.add(s);
+      }
     }
     _scheduleFlush();
     onChanged?.call();
@@ -131,16 +153,20 @@ class LocalizationService {
   static final List<RegExp> _rxUserData = [
     RegExp(r'https?://|www\.', caseSensitive: false),
     RegExp(r'[\w.+-]+@[\w-]+\.[a-z]{2,}', caseSensitive: false),
-    RegExp(r'\b(?:npub|nsec|note|nevent|nprofile|naddr|lnurl|lnbc)1[02-9ac-hj-np-z]{8,}',
-        caseSensitive: false),
+    RegExp(
+      r'\b(?:npub|nsec|note|nevent|nprofile|naddr|lnurl|lnbc)1[02-9ac-hj-np-z]{8,}',
+      caseSensitive: false,
+    ),
     RegExp(r'\b[0-9a-f]{12,}\b', caseSensitive: false),
     RegExp(r'[\p{L}\p{N}_]#[0-9a-f]{4}\b', caseSensitive: false, unicode: true),
     RegExp(
-        r'\b[\w-]+\.(?:jpe?g|png|gif|webp|heic|heif|avif|mp4|mov|m4v|webm|mkv|pdf|zip|rar|7z|txt|csv|json|docx?|xlsx?|pptx?|mp3|m4a|aac|wav|ogg|opus|flac|apk|ipa|dmg|exe)\b',
-        caseSensitive: false),
+      r'\b[\w-]+\.(?:jpe?g|png|gif|webp|heic|heif|avif|mp4|mov|m4v|webm|mkv|pdf|zip|rar|7z|txt|csv|json|docx?|xlsx?|pptx?|mp3|m4a|aac|wav|ogg|opus|flac|apk|ipa|dmg|exe)\b',
+      caseSensitive: false,
+    ),
   ];
 
-  static bool sendable(String text) => !_rxUserData.any((r) => r.hasMatch(text));
+  static bool sendable(String text) =>
+      !_rxUserData.any((r) => r.hasMatch(text));
 
   String relocalize(String shown) {
     final t = _templated[shown];
@@ -181,30 +207,46 @@ class LocalizationService {
       e.markNeedsBuild();
       e.visitChildren(mark);
     }
+
     mark(root);
   }
 
-  /// Languages whose pack was already loaded this session.
-  final Set<String> _packed = {};
+  /// Reapply a loaded pack after switching language, even if its disk cache
+  /// was evicted. AssetBundle caches the raw file; this caches the parsed pack.
+  final Map<String, Map<String, String>> _packs = {};
 
   /// Test-only: the singleton would otherwise let one test's load suppress the next.
   @visibleForTesting
-  void resetPackStateForTest() => _packed.clear();
+  void resetPackStateForTest() => _packs.clear();
 
   /// Reads one bundled pack; injectable so tests need no asset bundle.
   Future<String> Function(String assetKey) packLoader = rootBundle.loadString;
 
   Future<void> _primeFromPack(String code) async {
-    if (code.isEmpty || code == 'en' || !_packed.add(code)) return;
+    if (code.isEmpty || code == 'en') return;
     try {
-      final raw = await packLoader('assets/i18n/$code.json');
+      var map = _packs[code];
+      if (map == null) {
+        final raw = await packLoader('assets/i18n/$code.json');
+        final decoded = jsonDecode(raw);
+        if (decoded is! Map) return;
+        map = {
+          for (final entry in decoded.entries)
+            if (entry.key is String &&
+                entry.value is String &&
+                (entry.value as String).isNotEmpty)
+              entry.key as String: entry.value as String,
+        };
+        _packs[code] = map;
+        // Bound memory if many languages are previewed.
+        while (_packs.length > 2) {
+          _packs.remove(_packs.keys.first);
+        }
+      }
       // The language switched while the asset loaded.
       if (_lang != code) return;
-      final map = jsonDecode(raw);
-      if (map is! Map) return;
       var added = 0;
       map.forEach((k, v) {
-        if (k is! String || v is! String || v.isEmpty) return;
         if (_cache[k] == v) return;
         _cache[k] = v;
         // Nothing stays queued for a string the pack answered.
@@ -227,10 +269,17 @@ class LocalizationService {
   String sourceOf(String text) => _sources[text] ?? text;
 
   /// Synchronous: returns the cached translation or the English [source] and queues a miss; `{name}` args apply afterwards.
-  static String _brandUi(String value) {
+  static String _brandUi(String value, {String? source}) {
     // Actual upstream people/services keep their names; only the client is renamed.
-    if (RegExp(r'Nymchat (developer|bot)', caseSensitive:false).hasMatch(value)) return value;
-    return value.replaceAll('NYMCHAT', 'kachat').replaceAll('Nymchat', 'kachat');
+    if (RegExp(
+      r'Nymchat (developer|bot)',
+      caseSensitive: false,
+    ).hasMatch(source ?? value)) {
+      return value;
+    }
+    return value
+        .replaceAll('NYMCHAT', 'kachat')
+        .replaceAll('Nymchat', 'kachat');
   }
 
   String translate(String source, [Map<String, Object?>? args]) {
@@ -238,9 +287,11 @@ class LocalizationService {
     _seen.add(source);
     _shown.add(source);
     if (!isActive) return _subst(_brandUi(source), args);
-    final hit = _cache[source];
+    final hit = _usesReviewedPack
+        ? russianCountTemplate(source, args) ?? _cache[source]
+        : _cache[source];
     if (hit != null) {
-      final out = _subst(_brandUi(hit), args);
+      final out = _subst(_brandUi(hit, source: source), args);
       if (args != null && args.isNotEmpty) {
         _remember(out, source, args);
       } else if (out != source) {
@@ -250,7 +301,8 @@ class LocalizationService {
       }
       return out;
     }
-    if (!_requested.contains(source) &&
+    if (!_usesReviewedPack &&
+        !_requested.contains(source) &&
         !_failed.contains(source) &&
         sendable(source)) {
       // Rendered strings jump to the top lane; parked failures are skipped so they can't starve the sweep.
@@ -270,6 +322,7 @@ class LocalizationService {
       if (s.isEmpty) continue;
       _seen.add(s);
       if (isActive &&
+          !_usesReviewedPack &&
           sendable(s) &&
           !_cache.containsKey(s) &&
           !_requested.contains(s) &&
@@ -288,6 +341,7 @@ class LocalizationService {
       if (s.isEmpty) continue;
       _seen.add(s);
       if (isActive &&
+          !_usesReviewedPack &&
           sendable(s) &&
           !_cache.containsKey(s) &&
           !_requested.contains(s) &&
@@ -322,11 +376,18 @@ class LocalizationService {
   void _loadCache() {
     final kv = _kv;
     if (kv == null) return;
+    if (_usesReviewedPack) {
+      // Older releases persisted machine translations under this key.
+      unawaited(kv.remove('$_cachePrefix$_lang'));
+      return;
+    }
     final raw = kv.getString('$_cachePrefix$_lang');
     if (raw == null || raw.isEmpty) return;
     try {
       final decoded = jsonDecode(raw);
-      if (decoded is Map && decoded['v'] == cacheVersion && decoded['m'] is Map) {
+      if (decoded is Map &&
+          decoded['v'] == cacheVersion &&
+          decoded['m'] is Map) {
         (decoded['m'] as Map).forEach((k, v) {
           if (k is String && v is String) _cache[k] = v;
         });
@@ -338,10 +399,12 @@ class LocalizationService {
 
   void _persist() {
     final kv = _kv;
-    if (kv == null || !isActive) return;
+    if (kv == null || !isActive || _usesReviewedPack) return;
     try {
       kv.setString(
-          '$_cachePrefix$_lang', jsonEncode({'v': cacheVersion, 'm': _cache}));
+        '$_cachePrefix$_lang',
+        jsonEncode({'v': cacheVersion, 'm': _cache}),
+      );
     } catch (_) {}
   }
 
@@ -354,14 +417,14 @@ class LocalizationService {
   bool get isTranslating => isActive && (_anyPending || _inFlight > 0);
 
   void _scheduleFlush() {
-    if (_flushing || !_anyPending) return;
+    if (_flushing || _usesReviewedPack || !_anyPending) return;
     _debounce?.cancel();
     // Coalesce a screen's many `tr()` calls into one batch.
     _debounce = Timer(const Duration(milliseconds: 200), _flush);
   }
 
   Future<void> _flush() async {
-    if (_flushing || !isActive) return;
+    if (_flushing || !isActive || _usesReviewedPack) return;
     _flushing = true;
     final lang = _lang;
     try {
@@ -404,7 +467,7 @@ class LocalizationService {
   /// Translates one source with placeholders shielded, retrying with backoff; parks it in [_failed] if all attempts fail.
   Future<void> _translateOne(String source) async {
     final translator = _translator;
-    if (translator == null) return;
+    if (translator == null || _usesReviewedPack) return;
     final lang = _lang;
     final shielded = _shieldPlaceholders(source);
     for (var attempt = 0; attempt < _attemptsPerString; attempt++) {
@@ -412,15 +475,18 @@ class LocalizationService {
       try {
         final res = await translator.translate(shielded.text, lang);
         if (lang != _lang) return;
-        _cache[source] =
-            _restorePlaceholders(res.translatedText, shielded.tokens);
+        _cache[source] = _restorePlaceholders(
+          res.translatedText,
+          shielded.tokens,
+        );
         _failed.remove(source);
         return;
       } catch (_) {
         // Backoff 300ms, 600ms, …; the last attempt falls through to parking.
         if (attempt + 1 < _attemptsPerString) {
           await Future<void>.delayed(
-              Duration(milliseconds: 300 * (1 << attempt)));
+            Duration(milliseconds: 300 * (1 << attempt)),
+          );
         }
       }
     }

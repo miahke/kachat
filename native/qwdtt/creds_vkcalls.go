@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -149,11 +148,18 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 
 	log.Printf("[STREAM %d] [VKCalls] Identity - Name: %s | device_id=%s | TLS=Chrome_146 | UA: %s", streamID, name, deviceID, profile.UserAgent)
 
-	doRequest := func(step string, url string) (map[string]interface{}, error) {
-		req, err := fhttp.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(nil))
+	doRequestOnce := func(step string, url string) (map[string]interface{}, error) {
+		endpoint, parseErr := neturl.Parse(url)
+		if parseErr != nil {
+			return nil, errors.New("invalid API endpoint")
+		}
+		form := endpoint.RawQuery
+		endpoint.RawQuery = ""
+		req, err := fhttp.NewRequestWithContext(ctx, "POST", endpoint.String(), strings.NewReader(form))
 		if err != nil {
 			return nil, newVKCallsFailure(step, vkCallsFailureSetup, fmt.Errorf("create request: %w", err))
 		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("User-Agent", profile.UserAgent)
 		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
@@ -179,6 +185,52 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 			return nil, newVKCallsFailure(step, vkCallsFailureDecode, fmt.Errorf("unmarshal JSON: %w, body: %s", err, truncateVKCallsLog(string(body), 200)))
 		}
 		return resp, nil
+	}
+
+	doRequest := func(step string, target string) (map[string]interface{}, error) {
+		// Each confirmation retries the exact original method and arguments.
+		original, parseErr := neturl.Parse(target)
+		if parseErr != nil {
+			return nil, errors.New("invalid VK endpoint")
+		}
+		current := target
+		for attempt := 0; attempt < 3; attempt++ {
+			response, requestErr := doRequestOnce(step, current)
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			captcha, isCaptcha := vkCallsAPIError(response).(*VkCaptchaError)
+			if !mobileProtocolActive || !isCaptcha {
+				return response, nil
+			}
+			if attempt == 2 {
+				return nil, errors.New("CAPTCHA_WAIT_REQUIRED")
+			}
+			token, solveErr := requestMobileCaptcha(ctx, captcha)
+			if solveErr != nil {
+				return nil, errors.New("CAPTCHA_WAIT_REQUIRED")
+			}
+			retry := *original
+			query := retry.Query()
+			query.Set("captcha_sid", captcha.CaptchaSid)
+			if captcha.RedirectURI == "" {
+				query.Set("captcha_key", token)
+				query.Del("success_token")
+			} else {
+				query.Set("captcha_key", "")
+				query.Set("success_token", token)
+			}
+			query.Set("is_sound_captcha", "0")
+			if captcha.CaptchaTs != "" {
+				query.Set("captcha_ts", captcha.CaptchaTs)
+			}
+			if captcha.CaptchaAttempt != "" {
+				query.Set("captcha_attempt", captcha.CaptchaAttempt)
+			}
+			retry.RawQuery = query.Encode()
+			current = retry.String()
+		}
+		return nil, errors.New("CAPTCHA_WAIT_REQUIRED")
 	}
 
 	step1 := "step1 auth.getAnonymToken"

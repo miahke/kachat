@@ -1,5 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="play_integrity_project_number" translatable="false">435441872913</string>
-    <string name="nfc_share_service">Nymchat tap to share</string>
+    <string name="nfc_share_service">kachat tap to share</string>
+    <string name="background_connection_channel_name">Background connection</string>
+    <string name="background_connection_channel_description">Shown while kachat keeps its relay and mesh connections open in the background.</string>
+    <string name="background_connection_title">kachat is staying connected</string>
+    <string name="background_connection_text">Relays and the Bluetooth mesh keep running in the background.</string>
+    <string name="ongoing_calls_channel_name">Ongoing calls</string>
+    <string name="call_in_progress">Call in progress</string>
+    <string name="call_hangup">Hang up</string>
+    <string name="incoming_calls_channel_name">Incoming calls</string>
+    <string name="incoming_call_title">Incoming call</string>
+    <string name="incoming_call_open">Open kachat to answer</string>
+    <string name="incoming_call_decline">Decline</string>
+    <string name="incoming_call_answer">Answer</string>
 </resources>

@@ -1,6 +1,7 @@
 package com.bitchat.android.net.route
 
 import com.google.gson.Gson
+import com.bitchat.android.net.vk.VkTransportCaptcha
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -38,6 +39,8 @@ class NativeProcessBackend(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var process: Process? = null
     private var monitor: Job? = null
+    private val captchaStarted = java.util.concurrent.atomic.AtomicLong(0)
+    private val captchaElapsed = java.util.concurrent.atomic.AtomicLong(0)
 
     override suspend fun start(profile: NetworkProfile): SocksEndpoint =
         withContext(Dispatchers.IO) {
@@ -55,17 +58,31 @@ class NativeProcessBackend(
                 process = child
                 child.outputStream.write((config + "\n").toByteArray(Charsets.UTF_8))
                 child.outputStream.flush()
-                if (
-                    withTimeout(profile.connectTimeoutSeconds * 1000L + 3000L) {
-                        awaitStatus(child, profile.route)
-                    } != "READY"
-                )
+                captchaElapsed.set(0); captchaStarted.set(0)
+                val status = coroutineScope {
+                    val waiting = async { awaitStatus(child, profile.route) }
+                    val started = System.nanoTime()
+                    try {
+                        while (!waiting.isCompleted) {
+                            if (!child.isAlive) { VkTransportCaptcha.cancelPending(); throw IOException("Native transport exited") }
+                            val now = System.nanoTime()
+                            val activeStart = captchaStarted.get()
+                            val manual = captchaElapsed.get() + if (activeStart == 0L) 0 else now - activeStart
+                            val elapsed = now - started
+                            if (elapsed - minOf(manual, 180_000_000_000L) > (profile.connectTimeoutSeconds * 1000L + 3000L) * 1_000_000L)
+                                throw IOException("Native transport startup timed out")
+                            delay(100)
+                        }
+                        waiting.await()
+                    } finally { waiting.cancel() }
+                }
+                if (status != "READY")
                     throw IOException("Native transport could not connect")
                 currentCoroutineContext().ensureActive()
                 mutableState.value = BackendState.READY
                 monitor = scope.launch {
                     child.waitFor()
-                    if (process === child) mutableState.value = BackendState.ERROR
+                    if (process === child) { VkTransportCaptcha.cancelPending(); mutableState.value = BackendState.ERROR }
                 }
                 SocksEndpoint(profile.socksPort, profile.username, password)
             } catch (e: Throwable) {
@@ -86,7 +103,7 @@ class NativeProcessBackend(
                         try {
                             while (process === child) {
                                 val line = readStatusLine(child.inputStream)
-                                if (!delivered && ++startupLines > 128)
+                                if (!delivered && !line.startsWith("STATS:") && ++startupLines > 512)
                                     throw IOException("Too many startup status records")
                                 when {
                                     line == "READY" ->
@@ -96,6 +113,19 @@ class NativeProcessBackend(
                                             if (continuation.isActive) continuation.resume("READY")
                                             else break
                                         }
+                                    line.startsWith("CAPTCHA:") && route == NetworkRoute.VK -> {
+                                        if (captchaStarted.get() != 0L) throw IOException("Concurrent native challenge")
+                                        NetworkDiagnostics.log.record(route, NetworkStage.VK_CONFIRMATION_REQUIRED)
+                                        val started = System.nanoTime(); captchaStarted.set(started)
+                                        try {
+                                            val answer = runBlocking { VkTransportCaptcha.awaitChallenge(line.removePrefix("CAPTCHA:")) }
+                                            if (process !== child) throw IOException("Transport stopped")
+                                            synchronized(child.outputStream) {
+                                                child.outputStream.write(("CAPTCHA_RESULT:" + answer + "\n").toByteArray(Charsets.UTF_8))
+                                                child.outputStream.flush()
+                                            }
+                                        } finally { captchaElapsed.addAndGet(System.nanoTime() - started); captchaStarted.set(0) }
+                                    }
                                     line.startsWith("STATS:") && route == NetworkRoute.VK -> QwdttTelemetry.record(line)
                                     line.startsWith("STAGE:") -> {
                                         val stage =
@@ -195,6 +225,7 @@ class NativeProcessBackend(
         withContext(NonCancellable + Dispatchers.IO) {
             val child = process
             process = null
+            VkTransportCaptcha.cancelPending()
             if (child != null) {
                 runCatching { child.destroy() }
                 if (!child.waitFor(1000, TimeUnit.MILLISECONDS)) {
@@ -213,7 +244,7 @@ class NativeProcessBackend(
 
     private fun readStatusLine(input: InputStream): String {
         val line = StringBuilder()
-        repeat(256) {
+        repeat(32768) {
             val ch = input.read()
             if (ch == -1) throw java.io.EOFException("Native transport exited")
             if (ch == 10) return line.toString()
@@ -275,6 +306,7 @@ fun vkBackend(binary: File, directory: File, secret: (String) -> String?): Netwo
                         "turnTcp" to profile.turnTcp,
                         "noDtls" to profile.noDtls,
                         "obfuscation" to profile.obfuscation,
+                        "vkAnonPath" to profile.vkAnonPath,
                     )
                 )
         },

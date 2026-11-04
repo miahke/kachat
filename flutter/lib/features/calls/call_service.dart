@@ -529,7 +529,7 @@ class CallService {
 
   /// Starts a 1:1 call to [peer].
   Future<void> startCall(String peer, {bool video = false}) async {
-    if (!QwdttController.instance.nativeNetworkAllowed) { _system('Звонки WebRTC недоступны при выбранном qWDTT.'); return; }
+    if (!QwdttController.instance.nativeNetworkAllowed) { _system('Звонки WebRTC недоступны при выбранном Tor или qWDTT.'); return; }
     if (_self.isEmpty) {
       _self = _ref.read(nostrControllerProvider).identity?.pubkey ?? '';
     }
@@ -558,7 +558,7 @@ class CallService {
 
   /// Starts a mesh call to [groupId]'s members minus self.
   Future<void> startGroupCall(String groupId, {bool video = false}) async {
-    if (!QwdttController.instance.nativeNetworkAllowed) { _system('Звонки WebRTC недоступны при выбранном qWDTT.'); return; }
+    if (!QwdttController.instance.nativeNetworkAllowed) { _system('Звонки WebRTC недоступны при выбранном Tor или qWDTT.'); return; }
     if (_self.isEmpty) {
       _self = _ref.read(nostrControllerProvider).identity?.pubkey ?? '';
     }
@@ -670,7 +670,7 @@ class CallService {
 
   /// Accepts the current incoming call.
   Future<void> answer() async {
-    if (!QwdttController.instance.nativeNetworkAllowed) { _system('Звонки WebRTC недоступны при выбранном qWDTT.'); return; }
+    if (!QwdttController.instance.nativeNetworkAllowed) { _system('Звонки WebRTC недоступны при выбранном Tor или qWDTT.'); return; }
     final inc = _incoming;
     if (inc == null || inc.accepting) return;
     inc.accepting = true;
@@ -2121,7 +2121,7 @@ class CallService {
   }
 
   Future<void> _openPeer(_ActiveCall ac, String peerPubkey) async {
-    if (!QwdttController.instance.nativeNetworkAllowed) throw StateError('WebRTC недоступен при выбранном qWDTT');
+    if (!QwdttController.instance.nativeNetworkAllowed) throw StateError('WebRTC недоступен при выбранном Tor или qWDTT');
     if (fakeMedia != null && peerConnectionFactory == null) return;
 
     final config = <String, dynamic>{'iceServers': IceServers.servers};
@@ -2129,7 +2129,7 @@ class CallService {
     final pc = factory != null
         ? await factory(config)
         : await createPeerConnection(config);
-    if (!QwdttController.instance.nativeNetworkAllowed) { await releasePeerConnection(pc); throw StateError('WebRTC blocked by qWDTT'); }
+    if (!QwdttController.instance.nativeNetworkAllowed) { await releasePeerConnection(pc); throw StateError('WebRTC blocked by the selected protected route'); }
     final peer = _Peer(pc: pc, nym: _nymFor(peerPubkey));
     await peer.renderer.initialize();
     if (_active != ac) {

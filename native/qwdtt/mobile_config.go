@@ -16,6 +16,7 @@ import (
 )
 
 type mobileConfig struct {
+	VkAnonPath           string `json:"vkAnonPath"`
 	AutoPeer             bool   `json:"autoPeer"`
 	FallbackPort         int    `json:"fallbackPort"`
 	DTLSTimeoutSeconds   int    `json:"dtlsTimeoutSeconds"`
@@ -66,6 +67,12 @@ func readMobileConfig(r io.Reader) (mobileConfig, error) {
 	}
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return c, errors.New("trailing configuration data")
+	}
+	if c.VkAnonPath == "" {
+		c.VkAnonPath = "vkcalls"
+	}
+	if c.VkAnonPath != "vkcalls" && c.VkAnonPath != "legacy" {
+		return c, errors.New("invalid VK anonymous path")
 	}
 	if c.Mode != "wg" && c.Mode != "raw" {
 		return c, errors.New("invalid mode")
@@ -125,7 +132,7 @@ func (c mobileConfig) args() []string {
 	if c.Mode == "raw" {
 		mode = "rawtun"
 	}
-	args := []string{"-mode", mode, "-n", "2", "-listen", "127.0.0.1:0", "-peer", c.Peer,
+	args := []string{"-vk-anon-path", c.VkAnonPath, "-mode", mode, "-n", "2", "-listen", "127.0.0.1:0", "-peer", c.Peer,
 		"-vk", c.Hash, "-password", c.Password, "-socks", net.JoinHostPort("127.0.0.1", strconv.Itoa(c.Port)),
 		"-socks-auth=true", "-socks-user", c.Username, "-socks-pass", c.SocksPassword,
 		"-dtls-timeout", strconv.Itoa(c.DTLSTimeoutSeconds), "-config-timeout", strconv.Itoa(c.ConfigTimeoutSeconds), "-tunnel-dns", c.TunnelDNS, "-tunnel-mtu", strconv.Itoa(c.TunnelMTU), "-wg-keepalive", strconv.Itoa(c.WGKeepalive),

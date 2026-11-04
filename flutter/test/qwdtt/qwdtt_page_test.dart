@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/features/qwdtt/qwdtt_controller.dart';
@@ -6,6 +8,9 @@ import 'package:nym_bar/features/qwdtt/qwdtt_page.dart';
 class FakeQwdtt extends QwdttController {
   final calls = <(String, Map<String, dynamic>?)>[];
   bool ready = false;
+  String activeRoute = 'VK';
+  @override
+  String get route => activeRoute;
   @override
   String get state => ready ? 'READY' : 'STOPPED';
   @override
@@ -37,6 +42,12 @@ class FakeQwdtt extends QwdttController {
   List<Map<String, dynamic>> get events => [];
   @override
   Future<void> refresh() async {}
+  @override
+  Future<String> exportProfile(String id) async {
+    calls.add(('export', {'id': id}));
+    return 'qwdtt://config?pass=synthetic';
+  }
+
   @override
   Future<void> command(String method, [Map<String, dynamic>? arguments]) async {
     calls.add((method, arguments));
@@ -102,8 +113,124 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(home: QwdttPage(controller: controller)),
       );
-      expect(find.text('qWDTT · Подключено'), findsOneWidget);
+      expect(find.text('qWDTT · Локальный прокси готов'), findsOneWidget);
+      expect(find.textContaining('не подтверждает доступ'), findsOneWidget);
+      expect(find.byIcon(Icons.check_circle), findsOneWidget);
       expect(find.textContaining('2/2'), findsOneWidget);
     },
   );
+  testWidgets('editor preserves obfuscation and DNS selections on save', (
+    tester,
+  ) async {
+    final controller = FakeQwdtt();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: QwdttProfileEditor(
+          controller: controller,
+          profile: {
+            'id': 'synthetic-profile',
+            'name': 'Synthetic profile',
+            'serverHost': 'server.example.invalid',
+            'obfuscation': 'video',
+            'dns': 'doh-google',
+          },
+        ),
+      ),
+    );
+    await tester.scrollUntilVisible(
+      find.text('Дополнительные параметры'),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Дополнительные параметры'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('qwdtt-obfuscation')));
+    expect(find.text('Видеозвонок'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Сохранить'),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Сохранить'));
+    await tester.pumpAndSettle();
+    final profile =
+        jsonDecode(controller.calls.single.$2!['profile'] as String) as Map;
+    expect(profile['obfuscation'], 'video');
+    expect(profile['dns'], 'doh-google');
+    expect(profile['route'], 'VK');
+    expect(profile.containsKey('workers'), false);
+  });
+
+  testWidgets('invalid numeric settings stay in editor without saving', (
+    tester,
+  ) async {
+    final controller = FakeQwdtt();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: QwdttProfileEditor(
+          controller: controller,
+          profile: {
+            'id': 'synthetic-profile',
+            'name': 'Synthetic profile',
+            'serverHost': 'server.example.invalid',
+          },
+        ),
+      ),
+    );
+    await tester.scrollUntilVisible(
+      find.text('Дополнительные параметры'),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Дополнительные параметры'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('qwdtt-field-socksPort')));
+    await tester.enterText(
+      find.byKey(const Key('qwdtt-field-socksPort')),
+      '80',
+    );
+    await tester.scrollUntilVisible(
+      find.text('Сохранить'),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Сохранить'));
+    await tester.pumpAndSettle();
+    expect(controller.calls, isEmpty);
+    expect(
+      find.text('Локальный порт: допустимо от 1024 до 65535.'),
+      findsOneWidget,
+    );
+  });
+  testWidgets('Tor readiness never marks VK transport stages ready', (
+    tester,
+  ) async {
+    final controller = FakeQwdtt()
+      ..ready = true
+      ..activeRoute = 'TOR';
+    await tester.pumpWidget(
+      MaterialApp(home: QwdttPage(controller: controller)),
+    );
+    expect(find.text('qWDTT · Выбран Tor'), findsOneWidget);
+    expect(find.byIcon(Icons.check_circle), findsNothing);
+    expect(find.textContaining('2/2'), findsNothing);
+  });
+
+  testWidgets('sharing is explicit and explains included secrets before copy', (
+    tester,
+  ) async {
+    final controller = FakeQwdtt();
+    await tester.pumpWidget(
+      MaterialApp(home: QwdttPage(controller: controller)),
+    );
+    expect(controller.calls, isEmpty);
+    await tester.ensureVisible(find.byTooltip('Поделиться ключом'));
+    await tester.tap(find.byTooltip('Поделиться ключом'));
+    await tester.pumpAndSettle();
+    expect(controller.calls.single.$1, 'export');
+    expect(controller.calls.single.$2, {'id': 'synthetic-profile'});
+    expect(find.textContaining('Ключ содержит пароль сервера'), findsOneWidget);
+    expect(find.text('Скопировать ключ'), findsOneWidget);
+    expect(find.textContaining('pass=synthetic'), findsNothing);
+  });
 }

@@ -5,6 +5,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.net.URI
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.util.Base64
 
 class ImportedVkProfile(val profile: NetworkProfile, val secrets: Map<String, String>) {
@@ -49,6 +50,45 @@ object QwdttSubscriptionImport {
         return profiles
     }
 
+    /** Explicit share action only: the returned URI contains the server password and call hash. */
+    fun export(profile: NetworkProfile, password: String, hash: String): String {
+        profile.validate()
+        require(profile.route == NetworkRoute.VK)
+        require(password.length in 1..4096)
+        require(hash.length <= 4096 && hash.none(Char::isISOControl) && ',' !in hash)
+        val host = if (':' in profile.serverHost) "[${profile.serverHost}]" else profile.serverHost
+        val fields =
+            linkedMapOf(
+                "name" to profile.name,
+                "peer" to "$host:${profile.serverPort}",
+                "pass" to password,
+                "hashes" to hash,
+                "workers" to "2",
+                "port" to profile.socksPort.toString(),
+                "mode" to profile.vkMode.name.lowercase(),
+                "username" to profile.username,
+                "turnHost" to profile.turnHost,
+                "turnPort" to profile.turnPort.toString(),
+                "turnTcp" to profile.turnTcp.toString(),
+                "noDtls" to profile.noDtls.toString(),
+                "autoPeerMode" to profile.autoPeerMode.toString(),
+                "fallbackPort" to profile.fallbackPort.toString(),
+                "connectTimeoutSeconds" to profile.connectTimeoutSeconds.toString(),
+                "handshakeTimeoutSeconds" to profile.handshakeTimeoutSeconds.toString(),
+                "configTimeoutSeconds" to profile.configTimeoutSeconds.toString(),
+                "tunnelDns" to profile.tunnelDns,
+                "tunnelMtu" to profile.tunnelMtu.toString(),
+                "wgKeepaliveSeconds" to profile.wgKeepaliveSeconds.toString(),
+                "dns" to profile.dns,
+                "obfuscation" to profile.obfuscation,
+                "vkAnonPath" to profile.vkAnonPath,
+            )
+        return "qwdtt://config?" +
+            fields.entries.joinToString("&") {
+                URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
+            }
+    }
+
     private fun uriProfile(text: String): JsonObject {
         val uri =
             URI(
@@ -80,6 +120,17 @@ object QwdttSubscriptionImport {
                 ?.takeUnless { it.isJsonNull }
                 ?.asString
                 .orEmpty()
+        fun integer(key: String, default: Int): Int =
+            value(key).let { if (it.isEmpty()) default else it.toInt() }
+        fun boolean(key: String, default: Boolean): Boolean =
+            when (value(key).lowercase()) {
+                "" -> default
+                "true",
+                "1" -> true
+                "false",
+                "0" -> false
+                else -> throw IllegalArgumentException("Invalid $key")
+            }
         val peer = value("peer")
         require(peer.isNotBlank() && peer.length <= 300)
         val hostInput =
@@ -103,7 +154,7 @@ object QwdttSubscriptionImport {
         require(password.isNotEmpty() && password.length <= 4096)
         val hashes =
             value("hashes", "vkHashes")
-                .split(Regex("[,\\r\\n]+"))
+                .split(Regex("[,\r\n]+"))
                 .map(String::trim)
                 .filter(String::isNotEmpty)
                 .ifEmpty { listOf("") }
@@ -118,6 +169,7 @@ object QwdttSubscriptionImport {
                 "wireguard" -> VkMode.WG
                 else -> throw IllegalArgumentException("Unsupported qWDTT mode")
             }
+        val noDtls = boolean("noDtls", false)
         val name = value("name").ifBlank { "qWDTT" }.take(90)
         return hashes.mapIndexed { index, hash ->
             val profile =
@@ -125,9 +177,27 @@ object QwdttSubscriptionImport {
                     name = name + if (hashes.size > 1) " #" + (index + 1) else "",
                     route = NetworkRoute.VK,
                     serverHost = address.host.removeSurrounding("[", "]"),
-                    serverPort = if (address.port != -1) address.port else if(mode==VkMode.RAW)56003 else 56000,
+                    serverPort =
+                        if (address.port != -1) address.port
+                        else if (mode == VkMode.RAW) 56003 else if (noDtls) 56002 else 56000,
                     socksPort = proxyPort,
                     vkMode = mode,
+                    username = value("username").ifEmpty { "bitchat" },
+                    turnHost = value("turnHost"),
+                    turnPort = integer("turnPort", 0),
+                    turnTcp = boolean("turnTcp", true),
+                    noDtls = noDtls,
+                    autoPeerMode = boolean("autoPeerMode", true),
+                    fallbackPort = integer("fallbackPort", 56002),
+                    connectTimeoutSeconds = integer("connectTimeoutSeconds", 90),
+                    handshakeTimeoutSeconds = integer("handshakeTimeoutSeconds", 20),
+                    configTimeoutSeconds = integer("configTimeoutSeconds", 15),
+                    tunnelDns = value("tunnelDns"),
+                    tunnelMtu = integer("tunnelMtu", 0),
+                    wgKeepaliveSeconds = integer("wgKeepaliveSeconds", -1),
+                    dns = value("dns").ifEmpty { "doh-cloudflare" },
+                    obfuscation = value("obfuscation", "obfs").ifEmpty { "audio" },
+                    vkAnonPath = value("vkAnonPath").ifEmpty { "vkcalls" },
                 )
             profile.validate()
             ImportedVkProfile(

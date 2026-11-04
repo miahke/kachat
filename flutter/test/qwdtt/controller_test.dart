@@ -8,6 +8,45 @@ import 'package:nym_bar/features/qwdtt/qwdtt_controller.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('app.panchat/test-qwdtt');
+  test(
+    'cancelled captcha stops the protected route without direct fallback',
+    () async {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      var pending = true;
+      final methods = <String>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        methods.add(call.method);
+        if (call.method == 'solveCaptcha') {
+          throw PlatformException(
+            code: 'VK_CONFIRMATION',
+            message: 'Проверка VK отменена.',
+          );
+        }
+        if (call.method == 'disconnect') pending = false;
+        return {
+          'selected': true,
+          'route': 'VK',
+          'state': pending ? 'STARTING' : 'STOPPED',
+          if (pending) 'captcha': {'id': 'synthetic'},
+        };
+      });
+      final original = HttpOverrides.current;
+      final c = QwdttController(channel: channel, supported: () => true);
+      addTearDown(() {
+        c.dispose();
+        HttpOverrides.global = original;
+        messenger.setMockMethodCallHandler(channel, null);
+      });
+      await c.initialize();
+      await c.solveCaptcha();
+      expect(methods, contains('disconnect'));
+      expect(methods, isNot(contains('direct')));
+      expect(c.selected, true);
+      expect(c.nativeNetworkAllowed, false);
+      expect(c.state, 'STOPPED');
+    },
+  );
   test('unchanged status polls do not rebuild settings but changed state still notifies', () async {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;

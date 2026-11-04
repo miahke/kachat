@@ -1,5 +1,6 @@
 package com.bitchat.android.net.route
 
+import java.net.URI
 import java.util.UUID
 
 @androidx.annotation.Keep
@@ -43,6 +44,7 @@ data class NetworkProfile(
     val wgKeepaliveSeconds: Int = -1,
     val dns: String = "doh-cloudflare",
     val obfuscation: String = "audio",
+    val vkAnonPath: String = "vkcalls",
 ) {
     val workerCount: Int
         get() = 2
@@ -71,7 +73,13 @@ data class NetworkProfile(
         require(handshakeTimeoutSeconds in 5..60 && configTimeoutSeconds in 5..60)
         require(wgKeepaliveSeconds in -1..120)
         require(tunnelMtu == 0 || tunnelMtu in 576..1500)
+        if (route == NetworkRoute.VK) {
+            validateQwdttHost(serverHost, required = true)
+            validateQwdttHost(turnHost, required = false)
+            validateQwdttDns(dns)
+        }
         validateTunnelDns(tunnelDns, route)
+        require(vkAnonPath in listOf("vkcalls", "legacy")) { "Invalid VK authentication path" }
         require(obfuscation in listOf("audio", "video")) { "Invalid obfuscation mode" }
     }
 }
@@ -105,3 +113,70 @@ fun NetworkProfile.defaultPeerPort(): Int =
         noDtls -> 56002
         else -> 56000
     }
+
+/** Syntax checks only: editing a profile must never resolve a host or contact a DNS server. */
+fun validateQwdttHost(value: String, required: Boolean) {
+    if (value.isEmpty() && !required) return
+    require(value.isNotBlank() && value.length <= 253 && value.none(Char::isWhitespace)) {
+        "Укажите адрес сервера без порта и схемы"
+    }
+    val host = if (':' in value) "[$value]" else value
+    val uri = runCatching { URI("tcp://$host") }.getOrNull()
+    require(
+        uri != null &&
+            uri.host != null &&
+            uri.port == -1 &&
+            uri.userInfo == null &&
+            uri.path.isNullOrEmpty() &&
+            uri.query == null &&
+            uri.fragment == null
+    ) {
+        "Укажите адрес сервера без порта и схемы"
+    }
+}
+
+fun validateQwdttDns(value: String) {
+    if (
+        value.isEmpty() ||
+            value in
+                listOf(
+                    "yandex",
+                    "cloudflare",
+                    "google",
+                    "doh-yandex",
+                    "doh-cloudflare",
+                    "doh-google",
+                )
+    )
+        return
+    require(value.length <= 2048 && value.none(Char::isISOControl)) { "Некорректный DNS" }
+    if (value.startsWith("custom:")) {
+        val servers = value.removePrefix("custom:").split(',')
+        require(servers.size in 1..4) { "Укажите от 1 до 4 DNS-серверов" }
+        servers.forEach {
+            val parts = it.trim().split(':')
+            require(parts.size in 1..2 && (parts.size == 1 || parts[1].toIntOrNull() in 1..65535)) {
+                "Некорректный порт DNS"
+            }
+            validateTunnelDns(parts[0], NetworkRoute.VK)
+            require(parts[0].isNotBlank()) { "Укажите IPv4 DNS-сервера" }
+        }
+        return
+    }
+    require(value.startsWith("doh:")) { "Выберите DNS или укажите custom:IPv4 / doh:https://…" }
+    val endpoints = value.removePrefix("doh:").split(',')
+    require(endpoints.size in 1..4) { "Укажите от 1 до 4 DoH-серверов" }
+    endpoints.forEach {
+        val uri = runCatching { URI(it.trim()) }.getOrNull()
+        require(
+            uri != null &&
+                uri.scheme == "https" &&
+                !uri.host.isNullOrBlank() &&
+                uri.userInfo == null &&
+                uri.fragment == null &&
+                (uri.port == -1 || uri.port in 1..65535)
+        ) {
+            "Для DoH нужен полный HTTPS-адрес без логина и пароля"
+        }
+    }
+}

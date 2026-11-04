@@ -71,8 +71,8 @@ object NymRing {
         show(
             context,
             "",
-            text(context, "incoming", "Incoming call"),
-            text(context, "openToSee", "Open Nymchat to answer"),
+            text(context, "incoming", context.getString(R.string.incoming_call_title)),
+            text(context, "openToSee", context.getString(R.string.incoming_call_open)),
             false,
         )
     }
@@ -80,10 +80,14 @@ object NymRing {
     private fun createChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
+        manager.getNotificationChannel(CHANNEL_ID)?.let { existing ->
+            existing.name = text(context, "channel", context.getString(R.string.incoming_calls_channel_name))
+            manager.createNotificationChannel(existing)
+            return
+        }
         val channel = NotificationChannel(
             CHANNEL_ID,
-            text(context, "channel", "Incoming calls"),
+            text(context, "channel", context.getString(R.string.incoming_calls_channel_name)),
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
             setShowBadge(false)
@@ -142,8 +146,8 @@ object NymRing {
             val person = Person.Builder().setName(title).setImportant(true).build()
             builder.setStyle(Notification.CallStyle.forIncomingCall(person, decline, answer).setIsVideo(video))
         } else {
-            builder.addAction(Notification.Action.Builder(null, text(context, "decline", "Decline"), decline).build())
-            builder.addAction(Notification.Action.Builder(null, text(context, "answer", "Answer"), answer).build())
+            builder.addAction(Notification.Action.Builder(null, text(context, "decline", context.getString(R.string.incoming_call_decline)), decline).build())
+            builder.addAction(Notification.Action.Builder(null, text(context, "answer", context.getString(R.string.incoming_call_answer)), answer).build())
         }
         try {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

@@ -72,7 +72,7 @@ class MainActivity : FlutterFragmentActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         qwdttChannel?.close()
-        qwdttChannel = com.panchat.qwdtt.QwdttChannel(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
+        qwdttChannel = com.panchat.qwdtt.QwdttChannel(this, flutterEngine.dartExecutor.binaryMessenger)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, Transcriber.CHANNEL)
             .setMethodCallHandler { call, result -> Transcriber.handle(applicationContext, call, result) }

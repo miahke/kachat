@@ -1,4 +1,4 @@
-import '../qwdtt/qwdtt_page.dart';
+import '../network/network_settings_page.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -455,11 +455,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final privacy = _privacy(settings, ctrl);
     final sections = <_SectionSpec>[
       if (Platform.isAndroid) _SectionSpec(
-        key: 'qwdtt', title: 'qWDTT · Обход блокировок', groups: [
-          _GroupSpec(text: 'qWDTT VK TURN прокси обход блокировок WireGuard Raw подключения сервер подписки',
-            child: ListTile(leading: const Icon(Icons.router_outlined), title: const Text('Подключения qWDTT'),
-              subtitle: const Text('Ключи, WG / Raw, статус подключения и журнал'), trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const QwdttPage())))),
+        key: 'qwdtt', title: 'Сеть · Tor и qWDTT', groups: [
+          _GroupSpec(text: 'Tor obfs4 WebTunnel Snowflake мосты qWDTT VK TURN прокси обход блокировок WireGuard Raw подключения сервер подписки',
+            child: ListTile(leading: const Icon(Icons.router_outlined), title: const Text('Tor и qWDTT'),
+              subtitle: const Text('Мосты, ключи подключения, статус и сервер'), trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const NetworkSettingsPage())))),
         ]),
       _SectionSpec(
         key: 'appearance',

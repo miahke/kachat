@@ -1,3 +1,4 @@
+import 'features/i18n/ui_controls_localization.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -440,6 +441,10 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
     });
     return MaterialApp(
       title: 'kachat',
+      locale: uiControlLocale(
+          ref.watch(settingsProvider.select((s) => s.uiLanguage))),
+      localizationsDelegates: kUiControlDelegates,
+      supportedLocales: kUiControlLocales,
       navigatorKey: _navKey,
       navigatorObservers: [EventToastCenter.instance.observer],
       debugShowCheckedModeBanner: false,

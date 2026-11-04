@@ -7,10 +7,10 @@ class ApiConfig {
   /// Fixed API host, since a native app has no page origin.
   static const String apiHost = 'web.nymchat.app';
 
-  /// Keep in sync with pubspec `version`.
+  /// Upstream protocol version retained for backend compatibility.
   static const String appVersion = '3.75.545';
 
-  static const int appBuild = 877;
+  static const int appBuild = 879;
 
   /// Matches the backend's `/Nym(?:chat|bot)App\//i` client gate.
   static const String appUserAgent = 'NymchatApp/$appVersion';

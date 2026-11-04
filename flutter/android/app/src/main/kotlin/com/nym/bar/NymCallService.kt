@@ -24,9 +24,9 @@ class NymCallService : Service() {
             return START_NOT_STICKY
         }
         val video = intent?.getBooleanExtra(EXTRA_VIDEO, false) ?: false
-        val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Call in progress"
+        val title = intent?.getStringExtra(EXTRA_TITLE) ?: getString(R.string.call_in_progress)
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: ""
-        val hangup = intent?.getStringExtra(EXTRA_HANGUP) ?: "Hang up"
+        val hangup = intent?.getStringExtra(EXTRA_HANGUP) ?: getString(R.string.call_hangup)
         if (!startForegroundSafely(video, title, text, hangup)) {
             stopSelf()
         }
@@ -82,10 +82,14 @@ class NymCallService : Service() {
     private fun createChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
+        manager.getNotificationChannel(CHANNEL_ID)?.let { existing ->
+            existing.name = getString(R.string.ongoing_calls_channel_name)
+            manager.createNotificationChannel(existing)
+            return
+        }
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Ongoing calls",
+            getString(R.string.ongoing_calls_channel_name),
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
             setShowBadge(false)

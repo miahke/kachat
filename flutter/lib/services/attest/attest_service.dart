@@ -313,7 +313,7 @@ class AttestService {
   /// Platform proof over [challenge], or null when the device cannot attest; never falls back to a weaker claim.
   Future<Map<String, dynamic>?> _platformProof(String challenge) async {
     if (!QwdttController.instance.nativeNetworkAllowed) {
-      lastPlatformRefusal = 'native attestation unavailable through qWDTT';
+      lastPlatformRefusal = 'native attestation unavailable through the selected protected route';
       return null;
     }
     try {

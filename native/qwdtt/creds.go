@@ -316,6 +316,9 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 			log.Printf("[STREAM %d] [VK Auth] Success via VK Calls path", streamID)
 			return user, pass, addrs, nil
 		} else {
+			if mobileProtocolActive && strings.Contains(err.Error(), "CAPTCHA_WAIT_REQUIRED") {
+				return "", "", nil, err
+			}
 			if callErr, ok := asCallUnavailableError(err); ok {
 				log.Printf("[STREAM %d] [VK Auth] VK Calls path returned non-retryable call error: %v", streamID, callErr)
 				return "", "", nil, callErr
@@ -488,7 +491,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 			}
 
 			captchaErr := parseVkCaptchaError(errObj)
-			if captchaErr != nil && captchaErr.RedirectURI != "" && captchaErr.SessionToken != "" {
+			if captchaErr != nil && ((captchaErr.RedirectURI != "" && captchaErr.SessionToken != "") || (mobileProtocolActive && captchaErr.CaptchaImg != "" && captchaErr.CaptchaSid != "")) {
 				if attempt >= 3 {
 					log.Printf("[STREAM %d] [Captcha] Max attempts reached", streamID)
 					globalCaptchaLockout.Store(time.Now().Add(60 * time.Second).Unix())
@@ -509,6 +512,16 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 					return "", "", nil, fmt.Errorf("CAPTCHA_WAIT_REQUIRED")
 				}
 
+				if mobileProtocolActive && captchaErr.RedirectURI == "" {
+					values, parseErr := neturl.ParseQuery(originalData)
+					if parseErr != nil {
+						return "", "", nil, fmt.Errorf("CAPTCHA_WAIT_REQUIRED")
+					}
+					values.Set("captcha_sid", captchaErr.CaptchaSid)
+					values.Set("captcha_key", successToken)
+					data = values.Encode()
+					continue
+				}
 				captchaAttempt := captchaErr.CaptchaAttempt
 				if captchaAttempt == "0" || captchaAttempt == "" {
 					captchaAttempt = "1"
@@ -611,6 +624,9 @@ func solveCaptchaBySelectedMode(
 	profile Profile,
 	savedProfile *SavedProfile,
 ) (string, error) {
+	if mobileProtocolActive {
+		return requestMobileCaptcha(ctx, captchaErr)
+	}
 	if fresh, err := rotateCaptchaProfile(); err == nil {
 		savedProfile = fresh
 	} else {

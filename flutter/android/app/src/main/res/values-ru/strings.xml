@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="nfc_share_service">Обмен через NFC в kachat</string>
+    <string name="background_connection_channel_name">Фоновое подключение</string>
+    <string name="background_connection_channel_description">Показывается, пока kachat поддерживает соединения с ретрансляторами и ячеистой сетью в фоне.</string>
+    <string name="background_connection_title">kachat поддерживает соединение</string>
+    <string name="background_connection_text">Подключения к ретрансляторам и сети Bluetooth работают в фоне.</string>
+    <string name="ongoing_calls_channel_name">Текущие звонки</string>
+    <string name="call_in_progress">Идёт звонок</string>
+    <string name="call_hangup">Завершить звонок</string>
+    <string name="incoming_calls_channel_name">Входящие звонки</string>
+    <string name="incoming_call_title">Входящий звонок</string>
+    <string name="incoming_call_open">Откройте kachat, чтобы ответить</string>
+    <string name="incoming_call_decline">Отклонить</string>
+    <string name="incoming_call_answer">Ответить</string>
+</resources>

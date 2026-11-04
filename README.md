@@ -1,7 +1,7 @@
 # kachat
 
 An independent Android client based on Nymchat, with an integrated qWDTT
-transport and no in-app payments or store.
+transport, built-in Tor and no in-app payments or store.
 
 **Based on Nymchat by 21 Million LLC** — https://github.com/Spl0itable/NYM.
 This is a modified fork, not an official NYM release. Original notices and
@@ -15,8 +15,13 @@ corresponding sources under `native`, `server` and `third_party`.
 - Existing NYM messaging, media, groups, identity formats and encryption.
 - qWDTT profiles/import, WG or authenticated Raw, two transport workers,
   local authenticated SOCKS, VK call hashes, diagnostics and SSH deployment.
-- Explicit route selection: selected unavailable qWDTT blocks chat traffic.
-  Direct mode is a separate action. WebRTC/P2P cannot silently bypass qWDTT.
+- Built-in Tor with user-supplied obfs4/WebTunnel bridges and Snowflake,
+  actual bootstrap percentages and an authenticated loopback SOCKS listener.
+- Explicit persistent route selection: unavailable Tor/qWDTT blocks chat traffic.
+  Direct mode is a separate action. WebRTC/P2P cannot silently bypass either route.
+- Manual VK image/smart captcha popup for call hashes and TURN credentials;
+  applicable qWDTT network settings with full import/export.
+- Reviewed offline Russian UI, native notifications and localized controls.
 - No store, wallet, purchase invoices, gifts of paid credits or outgoing zaps.
   Payment payloads/receipts display a localized non-interactive notice.
 - Six color-named themes and a photo-to-glyph adaptive launcher icon with a
@@ -35,7 +40,9 @@ access administration**, not the entire NYM/Cloudflare backend. qWDTT access
 subscriptions are server credentials, not an in-app payment system.
 
 See [build/routing instructions](docs/BUILD-QWDTT.md) and the
-[patch report](docs/kachat-payments-performance-2026-11-04.md).
+[patch report](docs/kachat-payments-performance-2026-11-04.md),
+[network release verification](docs/kachat-network-release-2026-11-04.md) and
+[qWDTT settings parity](docs/qwdtt-settings-parity.md).
 Native media uses routed downloads before local playback; streaming playback
 through a new local range server is not implemented. Native FCM is not
 configured in this Android build.

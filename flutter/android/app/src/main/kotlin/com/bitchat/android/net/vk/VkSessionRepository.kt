@@ -8,7 +8,7 @@ import okhttp3.*
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-class VkSessionException(val publicMessage:String):IllegalStateException(publicMessage)
+open class VkSessionException(val publicMessage:String):IllegalStateException(publicMessage)
 
 /** The token is scoped to this module, never Bitchat identity, logs or URL parameters. */
 class VkSessionRepository(
@@ -39,18 +39,63 @@ class VkSessionRepository(
         if(revision.get()==expectedGeneration)revision.incrementAndGet()
     }
     suspend fun logout()=withContext(Dispatchers.IO){
+        VkTransportCaptcha.cancelPending()
         val calls=synchronized(sessionLock){
             revision.incrementAndGet();secrets.remove(tokenRef);mutableLoggedIn.value=false
             activeCalls.toList()
         }
         calls.forEach { it.cancel() }
     }
-    suspend fun generateCallHash():String=withContext(Dispatchers.IO){
+    /** At most two user confirmations; each answer is consumed once by its original request. */
+    suspend fun generateCallHashWithCaptcha(solve: suspend (VkCaptchaChallenge) -> VkCaptchaAnswer): String {
+        var challenge: VkCaptchaChallenge? = null
+        var answer: VkCaptchaAnswer? = null
+        repeat(3) { index ->
+            try { return generateCallHash(challenge, answer) }
+            catch (required: VkCaptchaRequired) {
+                if (index == 2) throw VkSessionException("VK повторно запросил проверку. Подождите и повторите получение хэша.")
+                challenge = required.challenge
+                answer = coroutineScope {
+                    val solving = async { withTimeout(180_000) { solve(required.challenge) } }
+                    val watcher = launch {
+                        while (isActive) {
+                            if (generation != required.challenge.epoch) {
+                                solving.cancel(CancellationException("VK session changed")); break
+                            }
+                            delay(100)
+                        }
+                    }
+                    try { solving.await() } finally { watcher.cancel() }
+                }
+            }
+        }
+        error("Unreachable")
+    }
+    suspend fun generateCallHash(): String = generateCallHash(null, null)
+    private suspend fun generateCallHash(challenge: VkCaptchaChallenge?, answer: VkCaptchaAnswer?):String=withContext(Dispatchers.IO){
         val (token,epoch)=synchronized(sessionLock){
             val token=secrets.get(tokenRef) ?: throw VkSessionException("Сначала войдите в VK.")
             token to revision.get()
         }
-        val body=FormBody.Builder().add("access_token",token).add("v","5.199").build()
+        if (challenge != null) {
+            if (challenge.epoch != epoch || !challenge.isFresh()) throw VkSessionException("Проверка VK истекла. Повторите получение хэша.")
+            requireNotNull(answer)
+            if (answer.value().length !in 1..8192 || answer.value().any { it.isISOControl() }) throw VkSessionException("Некорректный ответ проверки VK.")
+            if ((challenge.redirectUrl == null) != (answer is VkCaptchaAnswer.ImageKey)) throw VkSessionException("Ответ не соответствует проверке VK.")
+        }
+        val body=FormBody.Builder().add("access_token",token).add("v","5.199").apply {
+            if (challenge != null && answer != null) {
+                add("captcha_sid", challenge.sid)
+                when(answer) {
+                    is VkCaptchaAnswer.ImageKey -> add("captcha_key", answer.value)
+                    is VkCaptchaAnswer.SuccessToken -> {
+                        add("success_token", answer.value); add("captcha_key", ""); add("is_sound_captcha", "0")
+                        if (challenge.timestamp.isNotEmpty()) add("captcha_ts", challenge.timestamp)
+                        add("captcha_attempt", challenge.attempt.takeIf { it.isNotEmpty() && it != "0" } ?: "1")
+                    }
+                }
+            }
+        }.build()
         val request=Request.Builder().url("https://api.vk.ru/method/calls.start").post(body).build()
         val call=callFactory(client,request)
         synchronized(sessionLock){check(revision.get()==epoch){"VK session changed"};activeCalls+=call}
@@ -65,14 +110,17 @@ class VkSessionRepository(
                         val json=try{JSONObject(bytes.toString(Charsets.UTF_8))}finally{bytes.fill(0)}
                         json.optJSONObject("error")?.let { error ->
                             val code=error.optInt("error_code")
+                            if (code == 14) {
+                                synchronized(sessionLock) { check(revision.get() == epoch) { "VK session changed" } }
+                                throw VkCaptchaRequired(VkCaptchaPolicy.parse(error, epoch))
+                            }
                             if(code==5)synchronized(sessionLock){
                                 if(revision.get()==epoch){secrets.remove(tokenRef);revision.incrementAndGet();mutableLoggedIn.value=false}
                             }
                             throw VkSessionException(when(code){
                                 5->"Сессия VK истекла. Выполните вход заново."
                                 6,9,29->"VK ограничил частоту запросов. Подождите и повторите получение хэша."
-                                14->"VK запросил подтверждение. Повторите вход или вставьте готовый хэш."
-                                7,15->"VK не разрешил создание звонка для этой сессии. Повторите вход или используйте готовый хэш."
+                                                                7,15->"VK не разрешил создание звонка для этой сессии. Повторите вход или используйте готовый хэш."
                                 else->"VK не выдал ссылку звонка. Повторите позже или вставьте хэш вручную."
                             })
                         }

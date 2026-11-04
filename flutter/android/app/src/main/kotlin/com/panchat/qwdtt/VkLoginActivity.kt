@@ -3,6 +3,7 @@
 package com.panchat.qwdtt
 
 import android.app.Activity
+import android.app.Dialog
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.webkit.*
@@ -62,19 +63,37 @@ class VkLoginActivity : Activity() {
                 override fun onCreateWindow(view: WebView, dialog: Boolean, gesture: Boolean, msg: android.os.Message): Boolean {
                     if (!gesture || popups.isNotEmpty()) return false
                     val popup = WebView(this@VkLoginActivity)
-                    popup.settings.allowFileAccess = false; popup.settings.allowContentAccess = false
-                    popup.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                    val popupDialog = Dialog(this@VkLoginActivity)
+                    popup.settings.apply {
+                        javaScriptEnabled = true; domStorageEnabled = true
+                        allowFileAccess = false; allowContentAccess = false
+                        mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                        cacheMode = WebSettings.LOAD_NO_CACHE; safeBrowsingEnabled = true
+                        javaScriptCanOpenWindowsAutomatically = false; setSupportMultipleWindows(false)
+                    }
+                    popup.webChromeClient = object : WebChromeClient() {
+                        override fun onPermissionRequest(request: PermissionRequest) { request.deny() }
+                        override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback?) { callback?.invoke(origin, false, false) }
+                    }
                     popup.webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(child: WebView, request: WebResourceRequest): Boolean {
-                            if (request.isForMainFrame) {
-                                val target = request.url.toString()
-                                if (!acceptUrl(target) && VkOAuthParser.allowedNavigation(target)) web.loadUrl(target)
-                                child.stopLoading(); popups.remove(child); child.destroy()
-                            }
-                            return true
+                            val target = request.url.toString()
+                            return acceptUrl(target) || !VkOAuthParser.allowedNavigation(target)
                         }
+                        override fun onPageStarted(child: WebView, target: String, icon: Bitmap?) {
+                            if (acceptUrl(target) || !VkOAuthParser.allowedNavigation(target)) child.stopLoading()
+                        }
+                        override fun onReceivedSslError(child: WebView, handler: SslErrorHandler, error: android.net.http.SslError) { handler.cancel(); message("Ошибка сертификата VK. Вход остановлен.") }
                     }
-                    popups.add(popup); (msg.obj as WebView.WebViewTransport).webView = popup; msg.sendToTarget(); return true
+                    val content = LinearLayout(this@VkLoginActivity).apply { orientation = LinearLayout.VERTICAL }
+                    content.addView(Button(this@VkLoginActivity).apply { text = "Закрыть окно VK"; setOnClickListener { popupDialog.dismiss() } })
+                    content.addView(popup, LinearLayout.LayoutParams(-1, 0, 1f))
+                    popupDialog.setContentView(content)
+                    popupDialog.setOnDismissListener { popup.stopLoading(); popups.remove(popup); popup.destroy() }
+                    popups.add(popup)
+                    popupDialog.show()
+                    popupDialog.window?.setLayout(-1, -1)
+                    (msg.obj as WebView.WebViewTransport).webView = popup; msg.sendToTarget(); return true
                 }
             }
             webViewClient = object : WebViewClient() {
@@ -95,13 +114,13 @@ class VkLoginActivity : Activity() {
         }
         scope.launch {
             while (isActive) {
-                if (prepared && !accepting && !flow.oauthRequested && hasWindowFocus()) nextOAuth(web.url.orEmpty())
+                if (prepared && !accepting && !flow.oauthRequested && popups.isEmpty() && hasWindowFocus()) nextOAuth(web.url.orEmpty())
                 delay(750)
             }
         }
     }
     private fun nextOAuth(url: String) {
-        if (!VkOAuthParser.allowedNavigation(url)) return
+        if (popups.isNotEmpty() || !VkOAuthParser.allowedNavigation(url)) return
         val hasSession = listOf("https://vk.com", "https://vk.ru", "https://m.vk.com", "https://m.vk.ru").any { domain ->
             CookieManager.getInstance().getCookie(domain).orEmpty().split(';').any { it.trim().startsWith("remixsid=") && it.trim().substringAfter('=').isNotEmpty() }
         }

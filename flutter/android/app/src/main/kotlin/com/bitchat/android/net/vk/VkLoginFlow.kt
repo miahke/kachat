@@ -12,6 +12,10 @@ class VkLoginFlow(private val nonce:String) {
     }
     fun afterPage(url:String,hasSessionCookie:Boolean):String? {
         if(oauthRequested || !hasSessionCookie || !VkOAuthParser.allowedNavigation(url))return null
+        // A cookie can appear before VK finishes its login/security challenge.
+        val uri = java.net.URI(url)
+        if (uri.host !in setOf("vk.com", "vk.ru", "m.vk.com", "m.vk.ru") ||
+            uri.path !in setOf("", "/", "/feed", "/im", "/news")) return null
         oauthRequested=true
         return authorizeUrl(nonce)
     }

@@ -86,15 +86,20 @@ class NymBackgroundService : Service() {
     private fun createChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
+        manager.getNotificationChannel(CHANNEL_ID)?.let { existing ->
+            // Preserve user channel settings while updating translated metadata.
+            existing.name = getString(R.string.background_connection_channel_name)
+            existing.description = getString(R.string.background_connection_channel_description)
+            manager.createNotificationChannel(existing)
+            return
+        }
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Background connection",
+            getString(R.string.background_connection_channel_name),
             // MIN keeps the required notification as quiet as possible.
             NotificationManager.IMPORTANCE_MIN,
         ).apply {
-            description = "Shown while Nymchat keeps its relay and mesh " +
-                "connections open in the background."
+            description = getString(R.string.background_connection_channel_description)
             setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
@@ -116,8 +121,8 @@ class NymBackgroundService : Service() {
             Notification.Builder(this)
         }
         return builder
-            .setContentTitle("kachat is staying connected")
-            .setContentText("Relays and the Bluetooth mesh keep running in the background.")
+            .setContentTitle(getString(R.string.background_connection_title))
+            .setContentText(getString(R.string.background_connection_text))
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
             .setShowWhen(false)

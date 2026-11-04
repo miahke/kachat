@@ -1,3 +1,4 @@
+import 'features/i18n/ui_controls_localization.dart';
 import 'features/qwdtt/qwdtt_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -214,6 +215,10 @@ class _BootUnlockGateState extends ConsumerState<_BootUnlockGate> {
     final colors = ref.watch(nymColorsProvider);
     return MaterialApp(
       title: 'kachat',
+      locale: uiControlLocale(
+          ref.watch(settingsProvider.select((s) => s.uiLanguage))),
+      localizationsDelegates: kUiControlDelegates,
+      supportedLocales: kUiControlLocales,
       debugShowCheckedModeBanner: false,
       theme: buildNymThemeData(colors, a11y: ref.watch(nymA11yProvider)),
       home: VaultBootUnlock(
