@@ -41,8 +41,8 @@ and source link are preserved. Actual upstream developer/bot names, account
 formats, backend hostnames, client protocol identifiers and the shared #nymchat
 channel stay intact for truthful attribution and interoperability.
 
-The planned project links target github.com/miahke/kachat. The repository is
-not published by this patch. Upstream service privacy/terms URLs still describe
+The planned project links target github.com/miahke/kachat. Publication and artifact status are recorded in
+[kachat-test-1.md](kachat-test-1.md). Upstream service privacy/terms URLs still describe
 the NYM backend the client continues to use; they are not presented as a new
 self-hosted kachat backend.
 
@@ -100,4 +100,5 @@ payment function.
   payment receipts show an inert localized notice.
 - All 21 bundled payment-notice language packs parse as JSON.
 - Required attribution remains in NOTICE and About.
-- Publication and a new APK remain pending presentation to the owner.
+- The owner subsequently authorized packaging and publication; see
+  [kachat-test-1.md](kachat-test-1.md) for artifact status.
