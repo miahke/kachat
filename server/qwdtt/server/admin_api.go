@@ -221,6 +221,10 @@ func handleAdminCreatePassword(w http.ResponseWriter, r *http.Request) {
 		maxDevices = parsed
 	}
 	ports := r.FormValue("ports")
+	if _, ok := subscriptionPorts(ports); !ok {
+		writeAdminError(w, http.StatusBadRequest, "ports must contain three valid port numbers")
+		return
+	}
 	label := r.FormValue("label")
 
 	dbMutex.Lock()

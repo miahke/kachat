@@ -773,14 +773,13 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 					}
 					txt := fmt.Sprintf("👤 *Имя:* %s\n🔑 *Пароль:* `%s`\n", passwordEntryLabel(entry, pass, 0), pass)
 					if entry.VkHash != "" {
-						ports := entry.Ports
-						if ports == "" {
-							ports = "56000,56001,9000"
+						if pts, ok := subscriptionPorts(entry.Ports); ok {
+							srvIP := getPublicIP()
+							link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], pass, entry.VkHash)
+							txt += fmt.Sprintf("🔗 *Быстрая ссылка:* `%s`\n", link)
+						} else {
+							txt += "⚠️ Неверные порты подписки; исправьте её параметры.\n"
 						}
-						pts := strings.Split(ports, ",")
-						srvIP := getPublicIP()
-						link := fmt.Sprintf("wdtt://%s:%s:%s:%s:%s:%s", srvIP, pts[0], pts[1], pts[2], pass, entry.VkHash)
-						txt += fmt.Sprintf("🔗 *Быстрая ссылка:* `%s`\n", link)
 					}
 					if entry.IsDeactivated {
 						txt += "🔴 Статус: *ДЕАКТИВИРОВАН*\n"
@@ -1092,30 +1091,14 @@ func botLoop(token string, adminIDstr string, wgDev *device.Device) {
 			}
 
 			if waitingForPorts {
-				parts := strings.Split(cmd, ",")
-				if len(parts) != 3 {
-					sendTelegram(token, adminID, "❌ Неверный формат. Укажите 3 порта через запятую (например: 56000,56001,9000):", nil)
-					continue
-				}
-				p1 := strings.TrimSpace(parts[0])
-				p2 := strings.TrimSpace(parts[1])
-				p3 := strings.TrimSpace(parts[2])
-
-				if _, err := strconv.Atoi(p1); err != nil {
-					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
-					continue
-				}
-				if _, err := strconv.Atoi(p2); err != nil {
-					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
-					continue
-				}
-				if _, err := strconv.Atoi(p3); err != nil {
-					sendTelegram(token, adminID, "❌ Неверный порт. Повторите ввод:", nil)
+				ports, ok := botSubscriptionPorts(cmd)
+				if !ok {
+					sendTelegram(token, adminID, "❌ Укажите 3 порта от 1 до 65535 через запятую:", nil)
 					continue
 				}
 
 				waitingForPorts = false
-				tempPorts = fmt.Sprintf("%s,%s,%s", p1, p2, p3)
+				tempPorts = ports
 				waitingForHash = true
 				sendTelegram(token, adminID, "🔑 Укажите VK хеш (или несколько через запятую):", nil)
 				continue

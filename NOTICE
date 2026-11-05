@@ -40,3 +40,5 @@ Modified 2026-11-04: reviewed and completed the Russian UI dictionary, made Russ
 Modified 2026-11-04: integrated rebuilt Arti and obfs4/WebTunnel/Snowflake transports with bootstrap progress, persistent protected routing, applicable qWDTT settings/import/export, manual VK captcha handling and bounded lifecycle cleanup. Corresponding native sources, build instructions and component licenses are retained.
 
 Modified 2026-11-04: added configurable qWDTT worker counts and unified multi-hash imports, broader Tor bridge configuration, external HTTP/HTTPS/SOCKS5 proxy routing/import, per-account local chat/channel archive, and restored original commerce functions behind explicit risk notices at the bottom of Information. Original attribution, protocol identifiers and component licenses remain intact.
+
+Modified 2026-11-05: validate qWDTT subscription ports in the admin API and Telegram bot, and safely handle malformed legacy records in Telegram administration; the embedded deployer contains the corresponding server source and rebuilt binary.
