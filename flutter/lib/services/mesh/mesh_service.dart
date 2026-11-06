@@ -398,21 +398,26 @@ class MeshService {
 
   void leaveChannel(String channel) => _channelCrypto.removeChannel(channel);
 
-  /// Sends a private message, handshaking first if needed; chunks at 255 bytes and returns the first id.
+  /// Sends a private message and retains its original first-id API.
   Future<String> sendPrivateMessage(String peerID, String content) async {
-    final chunks = _chunkContent(content);
-    String? firstId;
-    for (final chunk in chunks) {
-      final messageId = _uuid.v4();
-      firstId ??= messageId;
-      final pm = PrivateMessagePacket(messageID: messageId, content: chunk);
+    final parts = await sendPrivateMessageParts(peerID, content);
+    return parts.isEmpty ? '' : parts.first.messageID;
+  }
+
+  /// Returns the exact packets sent or queued so replay can reuse each id.
+  Future<List<PrivateMessagePacket>> sendPrivateMessageParts(
+      String peerID, String content) async {
+    final parts = <PrivateMessagePacket>[];
+    for (final chunk in _chunkContent(content)) {
+      final pm = PrivateMessagePacket(messageID: _uuid.v4(), content: chunk);
       final encoded = pm.encode();
-      if (encoded == null) continue;
+      if (encoded == null) throw StateError('Private message chunk too large');
       final plaintext =
           NoisePayload(NoisePayloadType.privateMessage, encoded).encode();
       await _sendOrQueueEncrypted(peerID, plaintext);
+      parts.add(pm);
     }
-    return firstId ?? '';
+    return parts;
   }
 
   bool fileFits(String fileName, String mimeType, Uint8List bytes,

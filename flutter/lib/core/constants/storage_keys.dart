@@ -200,6 +200,7 @@ class StorageKeys {
     leftGroupTimes,
     meshGossipArchive,
     meshPrekeys,
+    meshOutbox,
     switchOutbox,
   ];
 

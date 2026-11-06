@@ -116,9 +116,17 @@ class KeyValueStore {
   Future<void> setString(String key, String value) =>
       guardedSetString(_prefs, key, value);
 
+  Future<bool> setStringChecked(String key, String value) =>
+      _guardedSetStringChecked(_prefs, key, value);
+
   static Future<void> guardedSetString(
       SharedPreferences prefs, String key, String value) async {
-    if (_dead(prefs)) return;
+    await _guardedSetStringChecked(prefs, key, value);
+  }
+
+  static Future<bool> _guardedSetStringChecked(
+      SharedPreferences prefs, String key, String value) async {
+    if (_dead(prefs)) return false;
     final root = _root(prefs);
     final since = _seq;
     final done = Completer<void>();
@@ -128,13 +136,14 @@ class KeyValueStore {
     _writing[done.future] = _Flight(root, key, value, since);
     try {
       final r = await _write(prefs, key, value, () => _live(key, since));
-      if (!_live(key, since)) return;
+      if (!_live(key, since)) return false;
       if (r.ok) {
         _held.remove(key);
       } else if (r.user) {
         _held[key] = _Held(root, value);
         _arm();
       }
+      return r.ok;
     } finally {
       _writing.remove(done.future);
       done.complete();

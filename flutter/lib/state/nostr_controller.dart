@@ -2067,7 +2067,10 @@ class NostrController {
         _flushQueuedGroupReactions();
       } catch (_) {}
       try {
-        _persistMeshOutbox();
+        await _meshOutboxOperations;
+        await _loadMeshOutbox();
+        await _persistMeshOutbox(allowSuspended: true);
+        await _meshOutboxStore().idle;
       } catch (_) {}
       final sync = _storageSync;
       if (sync != null) {
@@ -6645,50 +6648,87 @@ class NostrController {
     try {
       _ref.read(appStateProvider.notifier).markOptimisticFailed(localId);
     } catch (_) {}
-    _persistMeshOutbox();
+    unawaited(_persistMeshOutbox());
   });
 
-  bool _meshOutboxLoaded = false;
-  bool _flushingMeshOutbox = false;
+  Future<void> _meshOutboxOperations = Future<void>.value();
 
-  /// Loads the persisted outbox so sends queued before a kill survive the restart.
-  void _loadMeshOutbox() {
-    if (_meshOutboxLoaded) return;
-    _meshOutboxLoaded = true;
-    try {
-      _meshOutbox.decode(
-          _ref.read(keyValueStoreProvider).getString(StorageKeys.meshOutbox));
-    } catch (_) {}
+  Future<T> _withMeshOutboxLock<T>(Future<T> Function() action) {
+    final result = _meshOutboxOperations.then((_) => action());
+    _meshOutboxOperations = result.then<void>((_) {}, onError: (Object error, StackTrace stackTrace) {});
+    return result;
   }
 
-  void _persistMeshOutbox() {
+  Future<void>? _meshOutboxLoading;
+  bool _meshOutboxLoaded = false;
+  bool _flushingMeshOutbox = false;
+  SealedKeyValue? _meshOutboxSealed;
+
+  SealedKeyValue _meshOutboxStore() => _meshOutboxSealed ??= SealedKeyValue(
+    _ref.read(keyValueStoreProvider),
+    blocked: () => PanicWipe.inProgress,
+  );
+
+  Future<void> _loadMeshOutbox() async {
+    if (_meshOutboxLoaded) return;
+    final pending = _meshOutboxLoading;
+    if (pending != null) return pending;
+    final load = () async {
+      final result = await _meshOutboxStore().readDetailed(
+        StorageKeys.meshOutbox,
+      );
+      if (result.status == SealedReadStatus.locked ||
+          result.status == SealedReadStatus.unreadable) {
+        throw StateError('Mesh outbox unavailable');
+      }
+      _meshOutbox.decode(result.value);
+      _meshOutboxLoaded = true;
+    }();
+    _meshOutboxLoading = load;
     try {
-      unawaited(_ref
-          .read(keyValueStoreProvider)
-          .setString(StorageKeys.meshOutbox, _meshOutbox.encode()));
-    } catch (_) {}
+      await load;
+    } finally {
+      _meshOutboxLoading = null;
+    }
+  }
+
+  Future<bool> _persistMeshOutbox({bool allowSuspended = false}) async {
+    if (!_meshOutboxLoaded || _retired || (_suspended && !allowSuspended)) return false;
+    return _meshOutboxStore().writeChecked(
+        StorageKeys.meshOutbox, _meshOutbox.encode());
   }
 
   /// Retains a mesh-carried send for republishing; the caller excludes ghost-pinned and mesh-only peers.
-  void enqueueMeshOutbox(MeshOutboxEntry entry) {
-    _loadMeshOutbox();
+  Future<void> enqueueMeshOutbox(MeshOutboxEntry entry) => _withMeshOutboxLock(() async {
+    await _loadMeshOutbox();
+    if (_suspended || _retired) throw StateError('Session is switching');
     final owner = _identity?.pubkey;
-    _meshOutbox.add(entry.owner == null && owner != null && owner.isNotEmpty
-        ? entry.ownedBy(owner)
-        : entry);
-    _persistMeshOutbox();
-  }
+    final owned = entry.owner == null && owner != null && owner.isNotEmpty
+        ? entry.ownedBy(owner) : entry;
+    // Stage the bounded queue first. A failed write must not evict existing
+    // entries or leave a failed send available for later replay.
+    final staged = MeshOutbox()..decode(_meshOutbox.encode())..add(owned);
+    if (!await _meshOutboxStore().writeChecked(StorageKeys.meshOutbox, staged.encode())) {
+      throw StateError('Mesh outbox could not be saved');
+    }
+    _meshOutbox.add(owned);
+  });
 
   /// Attaches the send-time signed event to a queued entry; ignored if the entry is gone.
-  void attachMeshOutboxSignedEvent(String localId, Map<String, dynamic> event) {
-    _loadMeshOutbox();
-    if (_meshOutbox.attachSignedEvent(localId, event)) _persistMeshOutbox();
-  }
+  Future<void> attachMeshOutboxSignedEvent(String localId, Map<String, dynamic> event) => _withMeshOutboxLock(() async {
+    await _loadMeshOutbox();
+    if (_suspended || _retired) return;
+    if (_meshOutbox.attachSignedEvent(localId, event)) await _persistMeshOutbox();
+  });
 
   /// Publishes the outbox oldest first, on reconnect and once after boot; re-entrant calls are ignored.
-  Future<void> flushMeshOutbox() async {
-    _loadMeshOutbox();
-    if (_flushingMeshOutbox) return;
+  Future<void> flushMeshOutbox() => _withMeshOutboxLock(() async {
+    try {
+      await _loadMeshOutbox();
+    } catch (_) {
+      return;
+    }
+    if (_flushingMeshOutbox || _suspended || _retired) return;
     final service = _service;
     final identity = _identity;
     if (service == null || identity == null) return;
@@ -6698,7 +6738,9 @@ class NostrController {
       if (!e.ownerless) continue;
       _meshOutbox.remove(e.localId);
       try {
-        _ref.read(appStateProvider.notifier).markOptimisticFailed(e.localId);
+        for (final localId in e.localIds) {
+          _ref.read(appStateProvider.notifier).markOptimisticFailed(localId);
+        }
       } catch (_) {}
     }
     final due = [
@@ -6706,12 +6748,13 @@ class NostrController {
         if (e.belongsTo(identity.pubkey)) e,
     ];
     if (due.isEmpty) {
-      _persistMeshOutbox(); // A prune may have emptied it.
+      await _persistMeshOutbox(); // A prune may have emptied it.
       return;
     }
     _flushingMeshOutbox = true;
     try {
       for (final entry in due) {
+        if (_suspended || _retired) break;
         final sent = await _publishMeshOutboxEntry(entry, service, identity);
         if (sent) {
           _meshOutbox.remove(entry.localId);
@@ -6722,9 +6765,9 @@ class NostrController {
       }
     } finally {
       _flushingMeshOutbox = false;
-      _persistMeshOutbox();
+      await _persistMeshOutbox();
     }
-  }
+  });
 
   /// The one place a mesh-carried channel send becomes a Nostr event, shared by replay and gateway mode.
   Future<NostrEvent?> _channelEventForOutbox({
@@ -6862,27 +6905,33 @@ class NostrController {
               );
           return true;
         case MeshOutboxKind.pm:
-          final nymMessageId =
-              entry.nymMessageId ?? entry.meshMessageId ?? entry.localId;
-          final rumor = PmLogic.buildPmRumor(
-            selfPubkey: identity.pubkey,
-            recipientPubkey: entry.target,
-            content: entry.content,
-            nymMessageId: nymMessageId,
-            // Keep the original send time.
-            nowSec: entry.createdAtSec,
-            nowMs: entry.createdAtSec * 1000,
-            extraTags: [
-              if ((entry.threadRoot ?? '').isNotEmpty)
-                ['nymthread', entry.threadRoot!],
-            ],
-          );
-          // `onWrap` archives to D1; replays must archive like live sends or offline recipients never get them.
-          await _publishDualPm(
-            rumor: rumor,
-            recipientPubkey: entry.target,
-            onWrap: _archiveSentWrap,
-          );
+          final parts = entry.parts ?? [
+            MeshOutboxPart(
+              localId: entry.localId,
+              messageId: entry.nymMessageId ?? entry.meshMessageId ?? entry.localId,
+              content: entry.content,
+            ),
+          ];
+          for (final part in parts) {
+            if (_suspended || _retired) return false;
+            final rumor = PmLogic.buildPmRumor(
+              selfPubkey: identity.pubkey,
+              recipientPubkey: entry.target,
+              content: part.content,
+              nymMessageId: part.messageId,
+              nowSec: entry.createdAtSec,
+              nowMs: entry.createdAtSec * 1000,
+              extraTags: [
+                if ((entry.threadRoot ?? '').isNotEmpty)
+                  ['nymthread', entry.threadRoot!],
+              ],
+            );
+            await _publishDualPm(
+              rumor: rumor,
+              recipientPubkey: entry.target,
+              onWrap: _archiveSentWrap,
+            );
+          }
           return true;
       }
     } catch (_) {
@@ -13710,7 +13759,14 @@ class NostrController {
     await _mergeRemoteSettingsWithRetry(sync);
     // Needs a settled settings read to tell "no record" from "could not look".
     await _ensurePqRoot();
-    await _restorePmArchive(sync);
+    if (sync.durableIdentity) {
+      await _restorePmArchive(sync);
+    } else {
+      try {
+        final wraps = await sync.pmRestoreEphemeral();
+        if (identical(_storageSync, sync)) await _replayArchiveAwait(wraps);
+      } catch (_) {}
+    }
     unawaited(sync.restoreDeposits());
     // Profile zap receipts are keyed on the recipient pubkey.
     final selfPk = _identity?.pubkey;

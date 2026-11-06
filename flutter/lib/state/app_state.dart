@@ -5561,8 +5561,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
       Map<String, dynamic>? fileOffer,
       String? threadRoot,
       ChatView? viewOverride,
-      bool own = true}) {
-    final trimmed = text.trim();
+      bool own = true,
+      bool preserveWhitespace = false}) {
+    final trimmed = preserveWhitespace ? text : text.trim();
     if (trimmed.isEmpty) return null;
     final view = viewOverride ?? state.view;
     final list = state.messages.putIfAbsent(view.storageKey, () => <Message>[]);

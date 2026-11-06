@@ -29,6 +29,8 @@ class DmOutbox {
     this.maxTries = 8,
     this.bucket = kRelayWrapBucket,
     this.retryWait = const Duration(seconds: 2),
+    this.confirmationTimeout = const Duration(seconds: 10),
+    this.maxConfirmationRetries = 3,
   }) : _now = now ?? DateTime.now;
 
   Future<int> Function(NostrEvent event) send;
@@ -37,10 +39,13 @@ class DmOutbox {
   final int maxTries;
   final WrapBucketConfig bucket;
   final Duration retryWait;
+  final Duration confirmationTimeout;
+  final int maxConfirmationRetries;
 
   final List<List<_DmEntry>> _q = [[], [], []];
   final Set<String> _ids = {};
   final LinkedHashMap<String, (_DmEntry, int)> _inflight = LinkedHashMap();
+  final Map<String, Timer> _confirmationTimers = {};
   WrapBucket? _bucket;
   Timer? _timer;
   int _seq = 0;
@@ -74,7 +79,13 @@ class DmOutbox {
   }
 
   void confirm(String eventId) {
+    _confirmationTimers.remove(eventId)?.cancel();
     _inflight.remove(eventId);
+    if (_ids.remove(eventId)) {
+      for (final q in _q) {
+        q.removeWhere((entry) => entry.event.id == eventId);
+      }
+    }
   }
 
   int _nowMs() => _now().millisecondsSinceEpoch;
@@ -151,11 +162,32 @@ class DmOutbox {
     } catch (_) {
       n = 0;
     }
-    if (n > 0 || _disposed) return;
+    if (_disposed || !identical(_inflight[entry.event.id]?.$1, entry)) return;
+    if (n > 0) {
+      _confirmationTimers.remove(entry.event.id)?.cancel();
+      final shift = entry.tries.clamp(0, 6);
+      _confirmationTimers[entry.event.id] = Timer(
+        confirmationTimeout * (1 << shift),
+        () => _confirmationExpired(entry),
+      );
+      return;
+    }
     _inflight.remove(entry.event.id);
     _pausedUntil = _nowMs() + retryWait.inMilliseconds;
     _enqueue(entry.event, entry.tier, entry.tries);
     _arm(retryWait.inMilliseconds);
+  }
+
+  void _confirmationExpired(_DmEntry entry) {
+    _confirmationTimers.remove(entry.event.id);
+    if (_disposed || !identical(_inflight[entry.event.id]?.$1, entry)) return;
+    _inflight.remove(entry.event.id);
+    if (entry.tries >= maxConfirmationRetries) {
+      failed++;
+      return;
+    }
+    _enqueue(entry.event, entry.tier, entry.tries + 1);
+    drain();
   }
 
   void _track(_DmEntry entry) {
@@ -174,6 +206,7 @@ class DmOutbox {
   }
 
   bool refused(String eventId) {
+    _confirmationTimers.remove(eventId)?.cancel();
     final v = _inflight.remove(eventId);
     if (v == null || _disposed) return false;
     final st = wrapBucketTake(_bucket, _nowMs(), 0, bucket).state;
@@ -192,5 +225,9 @@ class DmOutbox {
     _disposed = true;
     _timer?.cancel();
     _timer = null;
+    for (final timer in _confirmationTimers.values) {
+      timer.cancel();
+    }
+    _confirmationTimers.clear();
   }
 }

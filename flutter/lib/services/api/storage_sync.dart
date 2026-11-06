@@ -2820,6 +2820,13 @@ class StorageSync {
     }
   }
 
+  /// Recover recent deposits on boot without enabling the durable archive.
+  Future<List<Map<String, dynamic>>> pmRestoreEphemeral() {
+    if (_durable) return Future.value(const []);
+    final floor = _now().millisecondsSinceEpoch ~/ 1000 - 7 * 86400;
+    return pmGapWindow(floorSec: floor, sinceSec: floor - 2 * 86400);
+  }
+
   Future<List<Map<String, dynamic>>> pmGapWindow({
     required int floorSec,
     required int sinceSec,

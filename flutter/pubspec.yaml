@@ -1,7 +1,7 @@
 name: nym_bar
 description: "Experience the future of decentralized communication with Nymchat, a sleek and secure shell app that wraps around our powerful PWA, delivering instant notifications and seamless external browsing for an uncompromised user experience."
 publish_to: "none"
-version: 3.75.545-kachat.5+882
+version: 3.75.545-kachat.6+883
 
 environment:
   sdk: ^3.13.0
@@ -119,6 +119,7 @@ dev_dependencies:
   # transitively via path_provider, but a direct import needs a direct
   # dependency (`depend_on_referenced_packages`) or the version it compiles
   # against is whatever another package happens to pull in.
+  shared_preferences_platform_interface: any
   path_provider_platform_interface: any
   plugin_platform_interface: any
 

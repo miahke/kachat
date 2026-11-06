@@ -105,9 +105,13 @@ class QwdttEngine private constructor(private val context: Context) {
         "bridges" to (secretStore.get("tor:bridges") ?: ""),
     )
 
-    @Synchronized fun connectTor(mode: String, bridges: String, port: Int) {
+    fun validateTor(mode: String, bridges: String, port: Int) {
         require(port in 1024..65535 && bridges.toByteArray(Charsets.UTF_8).size <= 65536)
         TorConfiguration.bridgeLines(bridges, mode)
+    }
+
+    @Synchronized fun connectTor(mode: String, bridges: String, port: Int) {
+        validateTor(mode, bridges, port)
         secretStore.put("tor:bridges", bridges)
         check(prefs.edit().putString("torMode", mode).putInt("torPort", port).commit())
         selectRoute("TOR")

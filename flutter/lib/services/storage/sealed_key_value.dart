@@ -39,6 +39,22 @@ class SealedKeyValue {
     });
   }
 
+  /// Completes true only if encryption and the persistent write succeeded.
+  Future<bool> writeChecked(String key, String plain) {
+    final result = _writes.then((_) async {
+      if (_blocked() || _locked.contains(key)) return false;
+      try {
+        final sealed = await _crypto.encryptString(plain);
+        if (_blocked() || _locked.contains(key)) return false;
+        return await kv.setStringChecked(key, sealed);
+      } catch (_) {
+        return false;
+      }
+    });
+    _writes = result.then((_) {});
+    return result;
+  }
+
   void remove(String key) {
     _locked.remove(key);
     _enqueue(() => kv.remove(key));

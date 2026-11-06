@@ -305,6 +305,9 @@ class QwdttController extends ChangeNotifier {
         }.contains(method) ||
         (method == 'delete' && arguments?['id'] == activeId);
     try {
+      if (method == 'connectTor') {
+        await _channel.invokeMethod<void>('validateTor', arguments);
+      }
       if (switching) {
         _gateway?.block();
         _routeKey = null;

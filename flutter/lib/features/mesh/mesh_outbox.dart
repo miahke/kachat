@@ -5,6 +5,24 @@ import 'dart:convert';
 /// Which conversation surface an entry replays into.
 enum MeshOutboxKind { channel, pm }
 
+class MeshOutboxPart {
+  const MeshOutboxPart({required this.localId, required this.messageId, required this.content});
+  final String localId;
+  final String messageId;
+  final String content;
+  Map<String, dynamic> toJson() => {'localId': localId, 'messageId': messageId, 'content': content};
+  static MeshOutboxPart? fromJson(Object? value) {
+    if (value is! Map || value['localId'] is! String ||
+        value['messageId'] is! String || value['content'] is! String ||
+        (value['localId'] as String).isEmpty || (value['messageId'] as String).isEmpty ||
+        (value['content'] as String).isEmpty) {
+      return null;
+    }
+    return MeshOutboxPart(localId: value['localId'] as String,
+        messageId: value['messageId'] as String, content: value['content'] as String);
+  }
+}
+
 class MeshOutboxEntry {
   MeshOutboxEntry({
     required this.kind,
@@ -17,6 +35,7 @@ class MeshOutboxEntry {
     this.nymMessageId,
     this.signedEvent,
     this.owner,
+    this.parts,
     this.attempts = 0,
   });
 
@@ -48,6 +67,9 @@ class MeshOutboxEntry {
 
   final String? owner;
 
+  final List<MeshOutboxPart>? parts;
+  Iterable<String> get localIds => parts?.map((p) => p.localId) ?? [localId];
+
   /// Publish attempts spent, bounded so a dead relay set can't retry forever.
   int attempts;
 
@@ -72,6 +94,7 @@ class MeshOutboxEntry {
         nymMessageId: nymMessageId,
         signedEvent: signedEvent,
         owner: pubkey,
+        parts: parts,
         attempts: attempts,
       );
 
@@ -86,6 +109,7 @@ class MeshOutboxEntry {
         if (nymMessageId != null) 'nymMessageId': nymMessageId,
         if (signedEvent != null) 'signedEvent': signedEvent,
         if (owner != null) 'owner': owner,
+        if (parts != null) 'parts': [for (final part in parts!) part.toJson()],
         if (attempts > 0) 'attempts': attempts,
       };
 
@@ -110,6 +134,17 @@ class MeshOutboxEntry {
       if (k.name == kindName) kind = k;
     }
     if (kind == null) return null;
+    List<MeshOutboxPart>? parts;
+    if (raw.containsKey('parts')) {
+      final value = raw['parts'];
+      if (kind != MeshOutboxKind.pm || value is! List || value.isEmpty) return null;
+      parts = [];
+      for (final row in value) {
+        final part = MeshOutboxPart.fromJson(row);
+        if (part == null) return null;
+        parts.add(part);
+      }
+    }
     String? str(String k) => raw[k] is String ? raw[k] as String : null;
     return MeshOutboxEntry(
       kind: kind,
@@ -124,6 +159,7 @@ class MeshOutboxEntry {
           ? Map<String, dynamic>.from(raw['signedEvent'] as Map)
           : null,
       owner: str('owner'),
+      parts: parts,
       attempts: raw['attempts'] is num ? (raw['attempts'] as num).toInt() : 0,
     );
   }
@@ -157,8 +193,12 @@ class MeshOutbox {
     _entries.add(entry);
     while (_entries.length > cap) {
       final evicted = _entries.removeAt(0);
-      onDropped?.call(evicted.localId);
+      _reportDropped(evicted);
     }
+  }
+
+  void _reportDropped(MeshOutboxEntry entry) {
+    for (final id in entry.localIds) { onDropped?.call(id); }
   }
 
   /// Removes the entry for [localId]; returns whether one was held.
@@ -177,7 +217,7 @@ class MeshOutbox {
     if (expired.isEmpty) return false;
     for (final e in expired) {
       _entries.remove(e);
-      onDropped?.call(e.localId);
+      _reportDropped(e);
     }
     return true;
   }
@@ -199,6 +239,7 @@ class MeshOutbox {
         nymMessageId: e.nymMessageId,
         signedEvent: event,
         owner: e.owner,
+        parts: e.parts,
         attempts: e.attempts,
       );
       return true;
@@ -218,7 +259,7 @@ class MeshOutbox {
       e.attempts++;
       if (e.attempts >= maxAttempts) {
         _entries.remove(e);
-        onDropped?.call(e.localId);
+        _reportDropped(e);
         return true;
       }
       return false;

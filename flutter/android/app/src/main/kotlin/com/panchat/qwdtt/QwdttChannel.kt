@@ -40,6 +40,7 @@ class QwdttChannel(private val activity: Activity, messenger: BinaryMessenger) {
                             "proxySettings" -> engine.proxySettings()
                             "connectProxy" -> { engine.connectProxy(call.arguments as? Map<*, *> ?: emptyMap<String, Any>()); engine.snapshot() }
                             "torSettings" -> engine.torSettings()
+                            "validateTor" -> { engine.validateTor(requireNotNull(call.argument<String>("mode")), call.argument<String>("bridges") ?: "", call.argument<Int>("socksPort") ?: 19050); true }
                             "connectTor" -> { engine.connectTor(requireNotNull(call.argument<String>("mode")), call.argument<String>("bridges") ?: "", call.argument<Int>("socksPort") ?: 19050); engine.snapshot() }
                             "export" -> engine.export(requireNotNull(call.argument<String>("id")))
                             "import" -> { engine.import(requireNotNull(call.argument<String>("source"))); engine.snapshot() }

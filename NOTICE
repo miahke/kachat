@@ -44,3 +44,5 @@ Modified 2026-11-04: added configurable qWDTT worker counts and unified multi-ha
 Modified 2026-11-05: validate qWDTT subscription ports in the admin API and Telegram bot, and safely handle malformed legacy records in Telegram administration; the embedded deployer contains the corresponding server source and rebuilt binary.
 
 Modified 2026-11-06: simplify the introductory tutorial and settings presentation, share notification sound selection, and show the selected network route in the sidebar.
+
+Modified 2026-11-06: improve message delivery and mesh handling, protect persistent message queues, and correct Tor validation and connection handling.

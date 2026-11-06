@@ -720,7 +720,7 @@ class MeshBridge {
         channel: view.id.toLowerCase() == kMeshNearbyChannel ? null : channel,
       );
       // The echo stays; the round trip is deduped on ingest.
-      _queueForNostr(
+      await _queueForNostr(
         kind: MeshOutboxKind.channel,
         target: view.id,
         content: content,
@@ -735,7 +735,7 @@ class MeshBridge {
         // Out of range: keep the local echo and queue for Nostr where allowed; for pinned peers this fails closed.
         final echo = _app.sendLocal(content, threadRoot: threadRoot)
           ?..viaMesh = true;
-        _queueForNostr(
+        await _queueForNostr(
           kind: MeshOutboxKind.pm,
           target: view.id,
           content: content,
@@ -746,18 +746,28 @@ class MeshBridge {
         unawaited(_depositWithCouriers(view.id, content, echo));
         return;
       }
-      final id = await _service.sendPrivateMessage(peerId, content);
-      final echo = _app.sendLocal(content,
-          nymMessageId: id, threadRoot: threadRoot)
-        ?..viaMesh = true;
-      _queueForNostr(
+      final sent = await _service.sendPrivateMessageParts(peerId, content);
+      final parts = <MeshOutboxPart>[];
+      Message? firstEcho;
+      for (final part in sent) {
+        final echo = _app.sendLocal(part.content,
+            nymMessageId: part.messageID,
+            threadRoot: threadRoot,
+            viewOverride: view,
+            preserveWhitespace: true)
+          ?..viaMesh = true;
+        if (echo == null) continue;
+        firstEcho ??= echo;
+        parts.add(MeshOutboxPart(localId: echo.id,
+            messageId: part.messageID, content: part.content));
+      }
+      await _queueForNostr(
         kind: MeshOutboxKind.pm,
         target: view.id,
         content: content,
         threadRoot: threadRoot,
-        echo: echo,
-        meshMessageId: id,
-        nymMessageId: id,
+        echo: firstEcho,
+        parts: parts,
       );
     }
   }
@@ -795,7 +805,7 @@ class MeshBridge {
   }
 
   /// Queues a mesh send for Nostr on reconnect, except ghost-pinned PMs, mesh-only peers, and sends made online.
-  void _queueForNostr({
+  Future<void> _queueForNostr({
     required MeshOutboxKind kind,
     required String target,
     required String content,
@@ -803,7 +813,8 @@ class MeshBridge {
     String? threadRoot,
     String? meshMessageId,
     String? nymMessageId,
-  }) {
+    List<MeshOutboxPart>? parts,
+  }) async {
     if (echo == null) return;
     if (_online) return;
     final id = target.toLowerCase();
@@ -812,7 +823,7 @@ class MeshBridge {
       if (_meshOnlyPmPubkeys.contains(id)) return;
     }
     try {
-      _ref.read(nostrControllerProvider).enqueueMeshOutbox(
+      await _ref.read(nostrControllerProvider).enqueueMeshOutbox(
             MeshOutboxEntry(
               kind: kind,
               target: target,
@@ -823,10 +834,15 @@ class MeshBridge {
               threadRoot: threadRoot,
               meshMessageId: meshMessageId,
               nymMessageId: nymMessageId,
+              parts: parts,
             ),
           );
     } catch (_) {
-      // Best-effort: a queue failure must never cost the radio send.
+      // The radio send already happened, but relay replay is not safely queued.
+      for (final localId in parts?.map((p) => p.localId) ?? [echo.id]) {
+        _app.markOptimisticFailed(localId);
+      }
+      return;
     }
     // Sign once so gateway and outbox publish identical bytes (same id); after enqueue so mining can't delay queueing.
     unawaited(_signAndOfferToGateways(
@@ -857,7 +873,7 @@ class MeshBridge {
     );
     if (signed == null) return;
     try {
-      _ref
+      await _ref
           .read(nostrControllerProvider)
           .attachMeshOutboxSignedEvent(echo.id, signed.toJson());
     } catch (_) {
