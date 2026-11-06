@@ -31,6 +31,16 @@ class QwdttController extends ChangeNotifier {
   String probeState = 'idle';
   String? probeMessage;
   HttpClient? _probeClient;
+
+  /// True on platforms with the native routing stack; elsewhere this controller stays inert.
+  bool get supported => _supported();
+
+  /// True once initialization has started.
+  bool get initialized => _initialized;
+
+  /// The route explicitly reported by native code, or null while unknown.
+  String? get reportedRoute => _snapshot['route'] as String?;
+
   String get route =>
       _snapshot['route'] as String? ?? (selected ? 'VK' : 'DIRECT');
   Map<String, dynamic> get tor =>

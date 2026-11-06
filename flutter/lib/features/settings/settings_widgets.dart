@@ -87,6 +87,31 @@ class SettingsSection extends StatelessWidget {
   }
 }
 
+/// Small uppercase heading used to split one settings section into visual subgroups.
+class SettingsSubgroupHeader extends StatelessWidget {
+  const SettingsSubgroupHeader({super.key, required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 10),
+      child: Text(
+        title.toUpperCase(),
+        style: TextStyle(
+          color: c.text,
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.2,
+          height: 1.2,
+        ),
+      ),
+    );
+  }
+}
+
 /// Label, control, and optional hint or warning.
 class FormGroup extends StatelessWidget {
   const FormGroup({

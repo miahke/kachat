@@ -207,6 +207,53 @@ const List<TutorialStep> kTutorialSteps = [
   ),
 ];
 
+/// A grouped checklist card over a contiguous range of [kTutorialSteps].
+///
+/// The first step supplies the card title and lead paragraph; the rest render as
+/// checklist details, so the tour reuses the existing translated strings.
+@immutable
+class TutorialStepGroup {
+  const TutorialStepGroup({
+    required this.start,
+    required this.end,
+    this.target,
+    this.sidebar = TutorialSidebarAction.none,
+  });
+
+  /// Inclusive indexes into [kTutorialSteps].
+  final int start;
+  final int end;
+
+  /// Representative spotlight for the group; a missing target only centers the card.
+  final TutorialTarget? target;
+
+  /// On narrow layouts, whether to open or close the sidebar before measuring.
+  final TutorialSidebarAction sidebar;
+}
+
+/// Four grouped cards: identity/app chrome, sidebar discovery, chat, and the final note.
+const List<TutorialStepGroup> kTutorialGroups = [
+  TutorialStepGroup(
+    start: 0,
+    end: 3,
+    target: TutorialTarget.nymDisplay,
+    sidebar: TutorialSidebarAction.open,
+  ),
+  TutorialStepGroup(
+    start: 4,
+    end: 7,
+    target: TutorialTarget.channelList,
+    sidebar: TutorialSidebarAction.open,
+  ),
+  TutorialStepGroup(
+    start: 8,
+    end: 10,
+    target: TutorialTarget.messagesContainer,
+    sidebar: TutorialSidebarAction.close,
+  ),
+  TutorialStepGroup(start: 11, end: 11),
+];
+
 /// Every tutorial string, for pre-translation when a language is chosen; keep in step with `_card`'s `tr(...)` literals.
 List<String> tutorialStringsForPretranslate() => <String>[
       for (final step in kTutorialSteps) ...[step.title, step.body],
@@ -231,7 +278,7 @@ List<String> tutorialStringsForPretranslate() => <String>[
           'back to you.',
     ];
 
-/// Guided tour: spotlights each step's target with a dim cut-out and ring; any dismissal marks it seen via [onDismiss].
+/// Guided tour: four grouped checklist cards; each spotlights its representative target when available, and any dismissal marks it seen via [onDismiss].
 class TutorialOverlay extends StatefulWidget {
   const TutorialOverlay({
     super.key,
@@ -303,31 +350,30 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
     });
   }
 
-  bool get _isFinal => _index >= kTutorialSteps.length - 1;
+  bool get _isFinal => _index >= kTutorialGroups.length - 1;
 
   bool _narrow(BuildContext context) =>
       MediaQuery.of(context).size.width < NymDimens.tabletBreakpoint;
 
   /// Runs the sidebar action, scrolls the target into view, then measures.
   Future<void> _enterStep(int index) async {
-    final step = kTutorialSteps[index];
+    final group = kTutorialGroups[index];
     final sidebar = widget.sidebar;
     if (sidebar != null && _narrow(context)) {
-      if (step.sidebar == TutorialSidebarAction.open) {
+      if (group.sidebar == TutorialSidebarAction.open) {
         await sidebar.openSidebar();
-      } else if (step.sidebar == TutorialSidebarAction.close) {
+      } else if (group.sidebar == TutorialSidebarAction.close) {
         await sidebar.closeSidebar();
       }
     }
     if (!mounted) return;
-    await _ensureTargetVisible(step);
+    await _ensureTargetVisible(group.target);
     if (!mounted) return;
     _remeasure();
   }
 
   /// Scrolls the target fully into view, aligned toward its top so a list's first row stays under the spotlight.
-  Future<void> _ensureTargetVisible(TutorialStep step) async {
-    final target = step.target;
+  Future<void> _ensureTargetVisible(TutorialTarget? target) async {
     if (target == null) return;
     final ctx = TutorialTargets.contextOf(target);
     if (ctx == null) return;
@@ -355,9 +401,8 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
   /// Re-measures and repaints only on change, so the per-frame re-measure can't loop.
   void _remeasure() {
     if (!mounted) return;
-    final step = kTutorialSteps[_index];
-    final rect =
-        step.target == null ? null : TutorialTargets.rectOf(step.target!);
+    final target = kTutorialGroups[_index].target;
+    final rect = target == null ? null : TutorialTargets.rectOf(target);
     if (rect != _targetRect) setState(() => _targetRect = rect);
   }
 
@@ -384,37 +429,20 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
     );
   }
 
-  /// Steps without a target are always reachable.
-  bool _reachable(int index) {
-    final step = kTutorialSteps[index];
-    return step.target == null || TutorialTargets.rectOf(step.target!) != null;
-  }
-
   void _next() {
     if (_isFinal) {
       widget.onDismiss();
       return;
     }
-    var i = _index + 1;
-    // Advance to the next reachable step.
-    var guard = 0;
-    while (guard++ < kTutorialSteps.length &&
-        i < kTutorialSteps.length - 1 &&
-        !_reachable(i)) {
-      i++;
-    }
+    // Every group is a checklist card, so a missing spotlight never hides its content.
+    final i = _index + 1;
     setState(() => _index = i);
     _enterStep(i);
   }
 
   void _back() {
     if (_index <= 0) return;
-    var i = _index - 1;
-    // Retreat to the previous reachable step.
-    var guard = 0;
-    while (guard++ < kTutorialSteps.length && i > 0 && !_reachable(i)) {
-      i--;
-    }
+    final i = _index - 1;
     setState(() => _index = i);
     _enterStep(i);
   }
@@ -518,7 +546,8 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
   }
 
   Widget _card(NymColors c) {
-    final step = kTutorialSteps[_index];
+    final group = kTutorialGroups[_index];
+    final lead = kTutorialSteps[group.start];
     return Material(
       type: MaterialType.transparency,
       child: Container(
@@ -554,7 +583,7 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
               children: [
                 Expanded(
                   child: Text(
-                    tr(step.title).toUpperCase(),
+                    tr(lead.title).toUpperCase(),
                     style: TextStyle(
                       color: c.primary,
                       fontSize: 14,
@@ -569,10 +598,12 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
             ),
             const SizedBox(height: 10),
             Text(
-              tr(step.body),
+              tr(lead.body),
               style: TextStyle(color: c.text, fontSize: 13, height: 1.4),
             ),
             if (_index == 0) ..._keysPanel(c),
+            for (var i = group.start + 1; i <= group.end; i++)
+              ..._groupDetail(c, kTutorialSteps[i]),
                   ],
                 ),
               ),
@@ -580,7 +611,7 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
             const SizedBox(height: 10),
             Text(
               tr('Step {n} of {total}',
-                  {'n': _index + 1, 'total': kTutorialSteps.length}),
+                  {'n': _index + 1, 'total': kTutorialGroups.length}),
               style: TextStyle(color: c.textDim, fontSize: 11),
             ),
             const SizedBox(height: 12),
@@ -609,6 +640,25 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
       ),
     );
   }
+
+  /// One grouped checklist entry; titles and bodies reuse the original tutorial strings.
+  List<Widget> _groupDetail(NymColors c, TutorialStep step) => [
+        const SizedBox(height: 12),
+        Text(
+          tr(step.title).toUpperCase(),
+          style: TextStyle(
+            color: c.primary,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.8,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          tr(step.body),
+          style: TextStyle(color: c.text, fontSize: 13, height: 1.4),
+        ),
+      ];
 
   /// The nsec and recovery code on the first step, so they're saved first; signer logins get only the code.
   List<Widget> _keysPanel(NymColors c) {

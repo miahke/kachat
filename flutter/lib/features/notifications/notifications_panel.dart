@@ -30,9 +30,8 @@ import '../../widgets/common/nym_sheet.dart';
 import '../../widgets/nym_icons.dart';
 import '../chat_lock/chat_lock_providers.dart';
 import '../layout/layout_model.dart';
-import '../settings/settings_screen.dart' show notificationSoundOptions;
-import '../settings/settings_widgets.dart' show FormSelect, SettingsToggleRow;
-import 'notifications_service.dart' show notificationsServiceProvider;
+import '../settings/settings_widgets.dart' show SettingsToggleRow;
+import 'notification_sound_select.dart';
 import '../toasts/event_toast_prefs.dart';
 import '../toasts/event_toasts.dart';
 import '../../widgets/common/nym_tooltip.dart';
@@ -497,17 +496,8 @@ class _NotifTogglesState extends ConsumerState<_NotifToggles> {
           fontWeight: FontWeight.w600,
           letterSpacing: 1.2,
         ));
-    final soundSelect = FormSelect<String>(
-      key: const Key('notifSoundSelect'),
-      value: ref.watch(settingsProvider.select((s) => s.sound)),
-      items: notificationSoundOptions(),
-      onChanged: (v) {
-        ref.read(settingsProvider.notifier).setSound(v);
-        final svc = ref.read(notificationsServiceProvider);
-        svc.resetSoundDedupe();
-        unawaited(svc.playSound(v).catchError((_) {}));
-      },
-    );
+    final soundSelect =
+        NotificationSoundSelect(key: const Key('notifSoundSelect'));
 
     return Container(
       padding: EdgeInsets.fromLTRB(narrow ? 20 : 32, 0, narrow ? 20 : 32, 16),

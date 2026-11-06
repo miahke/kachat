@@ -42,3 +42,5 @@ Modified 2026-11-04: integrated rebuilt Arti and obfs4/WebTunnel/Snowflake trans
 Modified 2026-11-04: added configurable qWDTT worker counts and unified multi-hash imports, broader Tor bridge configuration, external HTTP/HTTPS/SOCKS5 proxy routing/import, per-account local chat/channel archive, and restored original commerce functions behind explicit risk notices at the bottom of Information. Original attribution, protocol identifiers and component licenses remain intact.
 
 Modified 2026-11-05: validate qWDTT subscription ports in the admin API and Telegram bot, and safely handle malformed legacy records in Telegram administration; the embedded deployer contains the corresponding server source and rebuilt binary.
+
+Modified 2026-11-06: simplify the introductory tutorial and settings presentation, share notification sound selection, and show the selected network route in the sidebar.

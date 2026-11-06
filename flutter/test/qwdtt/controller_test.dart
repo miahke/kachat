@@ -8,6 +8,25 @@ import 'package:nym_bar/features/qwdtt/qwdtt_controller.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('app.panchat/test-qwdtt');
+  test('reported route stays unknown until a native route is received', () async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      throw PlatformException(code: 'synthetic_failure');
+    });
+    final original = HttpOverrides.current;
+    final controller = QwdttController(channel: channel, supported: () => true);
+    addTearDown(() {
+      controller.dispose();
+      HttpOverrides.global = original;
+      messenger.setMockMethodCallHandler(channel, null);
+    });
+    expect(controller.reportedRoute, isNull);
+    await controller.initialize();
+    expect(controller.reportedRoute, isNull);
+    expect(controller.state, 'ERROR');
+    expect(controller.nativeNetworkAllowed, isFalse);
+  });
   test(
     'cancelled captcha stops the protected route without direct fallback',
     () async {

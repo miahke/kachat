@@ -13,7 +13,9 @@ import '../../features/chat_archive/chat_archive_providers.dart';
 import '../../features/chat_tools/chat_tools_ui.dart';
 import '../../features/composer/composer_model.dart';
 import '../../features/duo/duo_rail.dart';
+import '../../features/network/network_settings_page.dart';
 import '../../features/notifications/notifications_panel.dart';
+import '../../features/qwdtt/qwdtt_controller.dart';
 import '../../features/shortcuts/shortcuts.dart';
 import '../../features/group_tools/group_tools_ui.dart';
 import '../../features/calls/call_history_providers.dart';
@@ -973,6 +975,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
                         child: _MeshStatusIndicator(
                             onItemSelected: widget.onItemSelected),
                       ),
+                      Flexible(
+                        child: _RouteStatusIndicator(
+                            onItemSelected: widget.onItemSelected),
+                      ),
                     ],
                   )
                 : Column(
@@ -984,6 +990,8 @@ class _SidebarState extends ConsumerState<Sidebar> {
                         proxyMode: proxyMode,
                       ),
                       _MeshStatusIndicator(onItemSelected: widget.onItemSelected),
+                      _RouteStatusIndicator(
+                          onItemSelected: widget.onItemSelected),
                     ],
                   ),
           ),
@@ -1399,7 +1407,7 @@ class _StatusRow extends StatelessWidget {
         ),
       );
     });
-    return Semantics(selected: selected, child: row);
+    return Semantics(button: true, selected: selected, child: row);
   }
 }
 
@@ -1480,6 +1488,90 @@ class _MeshStatusIndicator extends ConsumerWidget {
               softWrap: false,
               style: TextStyle(
                   color: c.textDim.withValues(alpha: 0.7), fontSize: 10)),
+    );
+  }
+}
+
+/// Compact actual-route indicator; the source of truth is [QwdttController]'s
+/// native snapshot — deliberately independent of `AppState.proxyMode`, which
+/// only describes the relay-pool transport. Renders nothing where the native
+/// routing stack is absent.
+class _RouteStatusIndicator extends StatelessWidget {
+  const _RouteStatusIndicator({this.onItemSelected});
+
+  /// Closes the mobile drawer before the network page opens, or it reappears when the page pops.
+  final VoidCallback? onItemSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final q = QwdttController.instance;
+    if (!q.supported) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: q,
+      builder: (context, _) {
+        final c = context.nym;
+        if (q.reportedRoute == null && q.state != 'ERROR') {
+          return _StatusRow(
+            rowKey: const ValueKey('sidebarRouteRow'),
+            onTap: () => _openNetwork(context),
+            tooltip: tr('Network route'),
+            leading: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: c.textDim,
+                shape: BoxShape.circle,
+              ),
+            ),
+            label: tr('Route…'),
+          );
+        }
+        final routeLabel = switch (q.reportedRoute) {
+          'TOR' => 'Tor',
+          'VK' => 'qWDTT',
+          'PROXY' => tr('Proxy'),
+          'DIRECT' => tr('Direct'),
+          _ => tr('Blocked'),
+        };
+        final (stateLabel, stateColor) = !q.selected
+            ? (tr('explicit'), c.textDim)
+            : switch (q.state) {
+                'READY' => (tr('ready'), c.primary),
+                'STARTING' || 'RECONNECTING' =>
+                  (tr('connecting'), c.warning),
+                'ERROR' => (tr('error'), c.danger),
+                _ => (tr('off'), c.textDim),
+              };
+        return _StatusRow(
+          rowKey: const ValueKey('sidebarRouteRow'),
+          onTap: () => _openNetwork(context),
+          tooltip: tr('Network route: {route} · {state}. Tap for network settings.',
+              {'route': routeLabel, 'state': stateLabel}),
+          leading: Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              color: stateColor,
+              shape: BoxShape.circle,
+            ),
+          ),
+          label: routeLabel,
+          trailingText: stateLabel,
+          trailing: Text(
+            stateLabel,
+            maxLines: 1,
+            softWrap: false,
+            style: TextStyle(color: c.textDim.withValues(alpha: 0.7), fontSize: 10),
+          ),
+        );
+      },
+    );
+  }
+
+  void _openNetwork(BuildContext context) {
+    onItemSelected?.call();
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const NetworkSettingsPage()),
     );
   }
 }

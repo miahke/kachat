@@ -32,7 +32,7 @@ import '../../models/channel.dart';
 import '../../models/settings.dart';
 import '../identity/delete_account.dart';
 import '../identity/panic_overlay.dart';
-import '../notifications/notifications_service.dart';
+import '../notifications/notification_sound_select.dart';
 import '../../services/location/geolocation.dart';
 import '../../services/platform/background_connectivity.dart';
 import '../../services/storage/secure_store.dart';
@@ -1011,13 +1011,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  void _onSoundChanged(SettingsController ctrl, String value) {
-    ctrl.setSound(value);
-    final svc = ref.read(notificationsServiceProvider);
-    svc.resetSoundDedupe();
-    svc.playSound(value);
-  }
-
   /// Confirms, wipes the on-device cache (best-effort), then toasts and closes.
   Future<void> _clearCache() async {
     final ok = await showAppConfirm(
@@ -1836,6 +1829,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
       ],
       safety: <_GroupSpec>[
+        _GroupSpec(
+          text: '',
+          child: SettingsSubgroupHeader(title: tr('Detection')),
+        ),
         _toggleSpec(
           key: 'spamFilterEnabled',
           label: tr('Spam filter'),
@@ -1899,6 +1896,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   pubkey: ref.read(appStateProvider).selfPubkey)),
             ),
           ),
+        ),
+        _GroupSpec(
+          text: '',
+          child: SettingsSubgroupHeader(title: tr('Lists')),
         ),
         _GroupSpec(
           text: tr(
@@ -2170,12 +2171,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             {'options': _optText(notificationSoundOptions())}),
         child: FormGroup(
           label: tr('Notification Sound'),
-          child: FormSelect<String>(
+          // Stage and preview the chosen tone.
+          child: NotificationSoundSelect(
             key: const ValueKey('setting-sound'),
-            value: s.sound,
-            items: notificationSoundOptions(),
-            // Stage and preview the chosen tone.
-            onChanged: (v) => _onSoundChanged(ctrl, v),
           ),
         ),
       ),
@@ -3878,29 +3876,6 @@ class _TextSizeRow extends StatelessWidget {
     );
   }
 }
-
-/// Notification-sound options in order.
-List<({String value, String label})> notificationSoundOptions() => [
-      (value: 'beep', label: tr('Classic Beep')),
-      (value: 'low', label: tr('Low Tone')),
-      (value: 'high', label: tr('High Ping')),
-      (value: 'uhoh', label: tr('ICQ Uh-Oh')),
-      (value: 'msnding', label: tr('MSN Alert')),
-      (value: 'nudge', label: tr('MSN Nudge')),
-      (value: 'nokia', label: tr('Nokia SMS')),
-      (value: 'nokiatune', label: tr('Nokia Tune')),
-      (value: 'dialup', label: tr('Dial-Up Modem')),
-      (value: 'coin', label: tr('Mario Coin')),
-      (value: 'oneup', label: tr('Mario 1-Up')),
-      (value: 'powerup', label: tr('Mario Power-Up')),
-      (value: 'secret', label: tr('Zelda Secret')),
-      (value: 'gameboy', label: tr('Game Boy Boot')),
-      (value: 'tetris', label: tr('Tetris')),
-      (value: 'pokeheal', label: tr('Pokémon Heal')),
-      (value: 'chirp', label: tr('Communicator Chirp')),
-      (value: 'f1', label: tr('F1 Radio')),
-      (value: 'none', label: tr('Silent')),
-    ];
 
 /// Opens the full language chooser, since the list is too long for a dropdown.
 class _LanguageSelectRow extends StatelessWidget {
