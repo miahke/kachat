@@ -51,7 +51,7 @@ android {
         minSdk = 29
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         targetSdk = 36
-        versionCode = 883
+        versionCode = 884
         versionName = flutter.versionName
         
         // Support all ABIs - AGP 8.9.1 automatically handles 16 KB alignment

@@ -97,7 +97,7 @@ class DmOutbox {
   }
 
   void _enqueue(NostrEvent event, int tier, int tries) {
-    if (_ids.contains(event.id)) return;
+    if (_ids.contains(event.id) || _inflight.containsKey(event.id)) return;
     final t = tier == 0 || tier == 1 || tier == 2 ? tier : WrapTier.normal;
     final entry = _DmEntry(event, t, ++_seq, tries);
     if (tries > 0) {
@@ -173,8 +173,12 @@ class DmOutbox {
       return;
     }
     _inflight.remove(entry.event.id);
+    if (entry.tries >= maxTries) {
+      failed++;
+      return;
+    }
     _pausedUntil = _nowMs() + retryWait.inMilliseconds;
-    _enqueue(entry.event, entry.tier, entry.tries);
+    _enqueue(entry.event, entry.tier, entry.tries + 1);
     _arm(retryWait.inMilliseconds);
   }
 

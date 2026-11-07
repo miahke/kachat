@@ -30,8 +30,11 @@ class IsolateVerifier {
 
   static const int _presenceKind = 20001;
 
-  /// Ids whose signature already verified; an id binds its content, so a replay needs only the sha256 recheck.
+  /// IDs retained for persistence; ID-only seeds never bypass signature checks.
   final LinkedHashSet<String> _verifiedIds = LinkedHashSet<String>();
+
+  /// Exact event signatures verified during this process, bounded separately.
+  final LinkedHashSet<String> _verifiedCopies = LinkedHashSet<String>();
 
   /// Seeds the cache with ids already verified, e.g. messages restored from the local cache.
   void markVerified(Iterable<String> ids) {
@@ -43,7 +46,13 @@ class IsolateVerifier {
     _evictVerified();
   }
 
-  void _rememberVerified(String id) {
+  void _rememberVerified(String id, String sig) {
+    final copy = '$id:$sig';
+    _verifiedCopies.remove(copy);
+    _verifiedCopies.add(copy);
+    while (_verifiedCopies.length > verifiedCacheCap) {
+      _verifiedCopies.remove(_verifiedCopies.first);
+    }
     _verifiedIds.remove(id);
     _verifiedIds.add(id);
     _evictVerified();
@@ -73,8 +82,8 @@ class IsolateVerifier {
       return Future<bool>.value(false);
     }
     // Cache hit: this exact content already passed a full signature check.
-    if (_verifiedIds.contains(computedId)) {
-      _rememberVerified(computedId); // Promote (LRU).
+    if (_verifiedCopies.contains('$computedId:${event.sig}')) {
+      _rememberVerified(computedId, event.sig); // Promote (LRU).
       return Future<bool>.value(true);
     }
 
@@ -82,7 +91,7 @@ class IsolateVerifier {
     if (kIsWeb) {
       final ok = schnorr.verifyEvent(event);
       if (ok && event.kind != _presenceKind) {
-        _rememberVerified(computedId);
+        _rememberVerified(computedId, event.sig);
         onNewVerified?.call();
       }
       return Future<bool>.value(ok);
@@ -114,31 +123,32 @@ class IsolateVerifier {
     _pendingIds.removeRange(0, take);
     _waiters.removeRange(0, take);
 
-    final payload = <Map<String, dynamic>>[
-      for (final e in batch) e.toJson(),
-    ];
+    final payload = <Map<String, dynamic>>[for (final e in batch) e.toJson()];
     _inFlight = true;
-    compute(verifyEventsBatch, payload).then((results) {
-      // Guard positional alignment so a bad result length can never resolve to `true`.
-      var anyNew = false;
-      for (var i = 0; i < waiters.length; i++) {
-        final ok = i < results.length && results[i] == true;
-        if (ok && batch[i].kind != _presenceKind) {
-          _rememberVerified(ids[i]);
-          anyNew = true;
-        }
-        if (!waiters[i].isCompleted) waiters[i].complete(ok);
-      }
-      if (anyNew) onNewVerified?.call();
-    }).catchError((Object _) {
-      // Fail closed: an isolate failure drops the whole batch.
-      for (final w in waiters) {
-        if (!w.isCompleted) w.complete(false);
-      }
-    }).whenComplete(() {
-      _inFlight = false;
-      if (_pending.isNotEmpty) _flush();
-    });
+    compute(verifyEventsBatch, payload)
+        .then((results) {
+          // Guard positional alignment so a bad result length can never resolve to `true`.
+          var anyNew = false;
+          for (var i = 0; i < waiters.length; i++) {
+            final ok = i < results.length && results[i] == true;
+            if (ok && batch[i].kind != _presenceKind) {
+              _rememberVerified(ids[i], payload[i]['sig'] as String);
+              anyNew = true;
+            }
+            if (!waiters[i].isCompleted) waiters[i].complete(ok);
+          }
+          if (anyNew) onNewVerified?.call();
+        })
+        .catchError((Object _) {
+          // Fail closed: an isolate failure drops the whole batch.
+          for (final w in waiters) {
+            if (!w.isCompleted) w.complete(false);
+          }
+        })
+        .whenComplete(() {
+          _inFlight = false;
+          if (_pending.isNotEmpty) _flush();
+        });
   }
 }
 

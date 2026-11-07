@@ -49,12 +49,12 @@ class PqDevice {
   final bool layeredCapable;
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'ver': version,
-        'ts': seenAt,
-        'pq': postQuantumCapable ? 1 : 0,
-        'pq2': layeredCapable ? 1 : 0,
-      };
+    'id': id,
+    'ver': version,
+    'ts': seenAt,
+    'pq': postQuantumCapable ? 1 : 0,
+    'pq2': layeredCapable ? 1 : 0,
+  };
 
   static PqDevice? fromJson(dynamic raw) {
     if (raw is! Map) return null;
@@ -125,7 +125,11 @@ class PqAnnouncement {
     // An explicit retraction withdraws the whole claim and must be honored.
     if (decoded['retracted'] == true) {
       return PqAnnouncement(
-          publicKey: null, expiresAt: exp, epoch: 0, retracted: true);
+        publicKey: null,
+        expiresAt: exp,
+        epoch: 0,
+        retracted: true,
+      );
     }
 
     // No `pk` is a keyless Nymchat client, not a retraction; recording it avoids a pointless Bitchat wrap.
@@ -179,28 +183,27 @@ class PqAnnouncement {
     bool rootSeeded = false,
     // Whether we can open the combined format (holds an nsec), which decides `pk`.
     bool legacyCapable = true,
-  }) =>
-      jsonEncode({
-        'v': rootSeeded ? 2 : 1,
-        'alg': pqAlgorithm,
-        // Marks a Nymchat client with or without a KEM key, distinct from a retraction.
-        'nym': 1,
-        'epoch': epoch,
-        // `pk` means either format (nsec logins only); `pk2` layered only, so older peers send plain NIP-44 to signer logins.
-        if (publicKey != null && legacyCapable) 'pk': pq.b64uEncode(publicKey),
-        if (publicKey != null) 'pk2': pq.b64uEncode(publicKey),
-        'exp': expiresAt,
-        if (rootSeeded) 'src': 'root',
-        'devices': [for (final d in devices) d.toJson()],
-      });
+  }) => jsonEncode({
+    'v': rootSeeded ? 2 : 1,
+    'alg': pqAlgorithm,
+    // Marks a Nymchat client with or without a KEM key, distinct from a retraction.
+    'nym': 1,
+    'epoch': epoch,
+    // `pk` means either format (nsec logins only); `pk2` layered only, so older peers send plain NIP-44 to signer logins.
+    if (publicKey != null && legacyCapable) 'pk': pq.b64uEncode(publicKey),
+    if (publicKey != null) 'pk2': pq.b64uEncode(publicKey),
+    'exp': expiresAt,
+    if (rootSeeded) 'src': 'root',
+    'devices': [for (final d in devices) d.toJson()],
+  });
 
   /// The payload that retracts our announcement.
   static String encodeRetraction(int nowSec) => jsonEncode({
-        'v': 1,
-        'alg': pqAlgorithm,
-        'retracted': true,
-        'exp': nowSec,
-      });
+    'v': 1,
+    'alg': pqAlgorithm,
+    'retracted': true,
+    'exp': nowSec,
+  });
 }
 
 /// pubkey -> announced ML-KEM key with expiry; a null [keyFor] means send classical NIP-17.
@@ -208,43 +211,67 @@ class PqRegistry {
   PqRegistry({this.maxEntries = 5000});
 
   final int maxEntries;
-  final Map<String,
-      ({Uint8List? pk, int exp, int epoch, bool root, bool pq1, bool pq2})>
-      _keys = {};
+  final Map<
+    String,
+    ({Uint8List? pk, int exp, int epoch, bool root, bool pq1, bool pq2, int at})
+  >
+  _keys = {};
 
   /// Ingests a verified author's announcement; keyless ones are recorded to mark Nymchat clients.
-  void ingest(String pubkey, String content,
-      {required int nowSec, int createdAt = 0}) {
+  bool ingest(
+    String pubkey,
+    String content, {
+    required int nowSec,
+    int createdAt = 0,
+  }) {
     final ann = PqAnnouncement.parse(content);
-    if (ann == null) return;
+    if (ann == null) return false;
+    // Apply the ordering guard to withdrawals as well as announcements.
+    final held = _keys[pubkey];
+    if (held != null) {
+      final heldAt = held.at;
+      if (createdAt <= 0 || createdAt < heldAt ||
+          (held.exp == 0 && createdAt == heldAt)) {
+        return false;
+      }
+    }
     if (ann.retracted || ann.expiresAt <= nowSec) {
-      _keys.remove(pubkey);
-      return;
+      // Keep the signed timestamp as a bounded tombstone against older replays.
+      record(pubkey, null, 0, 0, createdAt: createdAt);
+      return true;
     }
-    // Kind 30078 is addressable, so the newest (by expiry) wins; replays and keyless boot publishes must not undo a live key.
-    final held = _entry(pubkey, nowSec);
-    if (held != null && createdAt > 0) {
-      final heldAt = held.exp - pqTtl.inSeconds;
-      if (createdAt < heldAt) return;
-    }
-    record(pubkey, ann.publicKey, ann.expiresAt, ann.epoch,
-        rootSeeded: ann.rootSeeded,
-        acceptsLegacy: ann.acceptsLegacy,
-        acceptsLayered: ann.acceptsLayered);
+    record(
+      pubkey,
+      ann.publicKey,
+      ann.expiresAt,
+      ann.epoch,
+      rootSeeded: ann.rootSeeded,
+      acceptsLegacy: ann.acceptsLegacy,
+      acceptsLayered: ann.acceptsLayered,
+      createdAt: createdAt,
+    );
+    return true;
   }
 
   /// Records a key (our own too), enforcing the cap here; the earliest-recorded entry is evicted.
-  void record(String pubkey, Uint8List? pk, int exp, int epoch,
-      {bool rootSeeded = false,
-      bool acceptsLegacy = true,
-      bool acceptsLayered = false}) {
+  void record(
+    String pubkey,
+    Uint8List? pk,
+    int exp,
+    int epoch, {
+    bool rootSeeded = false,
+    bool acceptsLegacy = true,
+    bool acceptsLayered = false,
+    int createdAt = 0,
+  }) {
     _keys[pubkey] = (
       pk: pk,
       exp: exp,
       epoch: epoch,
       root: rootSeeded,
       pq1: acceptsLegacy,
-      pq2: acceptsLayered
+      pq2: acceptsLayered,
+      at: createdAt > 0 ? createdAt : exp - pqTtl.inSeconds,
     );
     while (_keys.length > maxEntries) {
       _keys.remove(_keys.keys.first);
@@ -256,44 +283,54 @@ class PqRegistry {
   void clear() => _keys.clear();
 
   /// Live entry for a peer, or null; the single place expiry is enforced.
-  ({Uint8List? pk, int exp, int epoch, bool root, bool pq1, bool pq2})? _entry(
-      String pubkey, int nowSec) {
+  ({Uint8List? pk, int exp, int epoch, bool root, bool pq1, bool pq2, int at})?
+  _entry(String pubkey, int nowSec) {
     final rec = _keys[pubkey];
     if (rec == null) return null;
     if (rec.exp <= nowSec) {
-      _keys.remove(pubkey);
       return null;
     }
     return rec;
   }
 
   /// Usable ML-KEM key, or null when absent, expired, keyless, or post-quantum is off for us.
-  Uint8List? keyFor(String pubkey, {required int nowSec, required bool enabled}) {
+  Uint8List? keyFor(
+    String pubkey, {
+    required int nowSec,
+    required bool enabled,
+  }) {
     if (!enabled) return null;
     return _entry(pubkey, nowSec)?.pk;
   }
 
   /// Epoch of a peer's live announcement, needed when checking a pasted root.
-  int? epochFor(String pubkey) => _keys[pubkey]?.epoch;
+  int? epochFor(String pubkey) =>
+      _keys[pubkey]?.exp == 0 ? null : _keys[pubkey]?.epoch;
 
-  /// When a peer's live announcement was signed (exp - pqTtl), or 0 if expired or unknown.
+  /// When a peer's live announcement was signed, or 0 if expired or unknown.
   int announcedAtFor(String pubkey, {required int nowSec}) {
     final e = _entry(pubkey, nowSec);
     if (e == null || e.exp <= 0) return 0;
-    return e.exp - pqTtl.inSeconds;
+    return e.at;
   }
 
   /// Root-seeded live announcement, for the badge; keyless entries never are.
-  bool isRootSeeded(String pubkey,
-      {required int nowSec, required bool enabled}) {
+  bool isRootSeeded(
+    String pubkey, {
+    required int nowSec,
+    required bool enabled,
+  }) {
     if (!enabled) return false;
     final e = _entry(pubkey, nowSec);
     return e != null && e.pk != null && e.root;
   }
 
   /// Accepts the layered format, the only one a signer login on either end can open.
-  bool acceptsLayered(String pubkey,
-      {required int nowSec, required bool enabled}) {
+  bool acceptsLayered(
+    String pubkey, {
+    required int nowSec,
+    required bool enabled,
+  }) {
     if (!enabled) return false;
     final e = _entry(pubkey, nowSec);
     return e != null && e.pk != null && e.pq2;
@@ -305,31 +342,31 @@ class PqRegistry {
 
   /// Pubkeys with live ML-KEM keys; keyless entries don't count.
   List<String> knownPeers({required int nowSec}) => [
-        for (final e in _keys.entries)
-          if (e.value.exp > nowSec && e.value.pk != null) e.key
-      ];
+    for (final e in _keys.entries)
+      if (e.value.exp > nowSec && e.value.pk != null) e.key,
+  ];
 
-  /// Persistable map pubkey -> `[pk|null, exp, epoch]` without expired entries, matching the PWA's `pqKeys` record.
+  /// Persist live entries and bounded ordering tombstones (exp == 0).
   Map<String, dynamic> toJson({required int nowSec}) => {
-        for (final e in _keys.entries)
-          if (e.value.exp > nowSec)
-            e.key: [
-              e.value.pk == null ? null : pq.b64uEncode(e.value.pk!),
-              e.value.exp,
-              e.value.epoch,
-              e.value.root ? 1 : 0,
-              e.value.pq1 ? 1 : 0,
-              e.value.pq2 ? 1 : 0,
-            ],
-      };
+    for (final e in _keys.entries)
+      e.key: [
+          e.value.exp <= nowSec || e.value.pk == null ? null : pq.b64uEncode(e.value.pk!),
+          e.value.exp <= nowSec ? 0 : e.value.exp,
+          e.value.epoch,
+          e.value.root ? 1 : 0,
+          e.value.pq1 ? 1 : 0,
+          e.value.pq2 ? 1 : 0,
+          e.value.at,
+        ],
+  };
 
-  /// Restores keys as hints only; expired entries and corrupt rows are skipped.
+  /// Restores keys as hints and retains ordering tombstones; corrupt rows are skipped.
   void hydrate(Map<String, dynamic> raw, {required int nowSec}) {
     for (final entry in raw.entries) {
       final v = entry.value;
       if (v is! List || v.length < 3) continue;
       final exp = v[1];
-      if (exp is! int || exp <= nowSec) continue;
+      if (exp is! int || (exp != 0 && exp <= nowSec)) continue;
       final epoch = v[2] is int ? v[2] as int : 0;
       Uint8List? pk;
       final pkRaw = v[0];
@@ -345,10 +382,16 @@ class PqRegistry {
       // Rows from before formats were recorded come back keyless, since the send path must not seal to them.
       final preSplit = v.length <= 5;
       // Absent on rows from before the root existed; those peers were legacy.
-      record(entry.key, preSplit ? null : pk, exp, epoch,
-          rootSeeded: v.length > 3 && v[3] == 1,
-          acceptsLegacy: v.length > 4 ? v[4] == 1 : true,
-          acceptsLayered: v.length > 5 && v[5] == 1);
+      record(
+        entry.key,
+        preSplit ? null : pk,
+        exp,
+        epoch,
+        rootSeeded: v.length > 3 && v[3] == 1,
+        acceptsLegacy: v.length > 4 ? v[4] == 1 : true,
+        acceptsLayered: v.length > 5 && v[5] == 1,
+        createdAt: v.length > 6 && v[6] is int ? v[6] as int : 0,
+      );
     }
   }
 }
@@ -362,8 +405,12 @@ const Duration pqFreshKeyless = Duration(minutes: 10);
 class PqLookupLimiter {
   final Map<String, ({int atMs, bool answered})> _misses = {};
 
-  void record(String pubkey,
-      {required bool found, required bool answered, required int nowMs}) {
+  void record(
+    String pubkey, {
+    required bool found,
+    required bool answered,
+    required int nowMs,
+  }) {
     if (found) {
       _misses.remove(pubkey);
     } else {
@@ -375,12 +422,17 @@ class PqLookupLimiter {
 
   bool unanswered(String pubkey) => _misses[pubkey]?.answered == false;
 
-  bool due(String pubkey,
-      {required int nowMs, required int announcedAtSec, required bool keyless}) {
+  bool due(
+    String pubkey, {
+    required int nowMs,
+    required int announcedAtSec,
+    required bool keyless,
+  }) {
     final miss = _misses[pubkey];
     if (miss == null) return true;
     final nowSec = nowMs ~/ 1000;
-    final keylessFresh = keyless &&
+    final keylessFresh =
+        keyless &&
         announcedAtSec > 0 &&
         nowSec - announcedAtSec < pqFreshKeyless.inSeconds;
     final wait = (!miss.answered || keylessFresh)
@@ -434,11 +486,11 @@ class PqPolicy {
       sendCapable() && mode == PqMode.on;
 
   /// Self-addressed copies need a key we can decapsulate, or this device loses its own history.
-  static bool selfEnabled(
-          {required Uint8List? privkey,
-          Uint8List? root,
-          required PqMode mode}) =>
-      capable(privkey: privkey, root: root) && mode == PqMode.on;
+  static bool selfEnabled({
+    required Uint8List? privkey,
+    Uint8List? root,
+    required PqMode mode,
+  }) => capable(privkey: privkey, root: root) && mode == PqMode.on;
 
   /// On for anyone who can; a function so the escape hatch has a home.
   static PqMode initialMode({required bool seenBefore}) => PqMode.on;
@@ -458,13 +510,15 @@ class PqPolicy {
   }) {
     final out = [
       for (final d in previous)
-        if (d.id != deviceId && (nowSec - d.seenAt) < pqDeviceStale.inSeconds) d,
+        if (d.id != deviceId && (nowSec - d.seenAt) < pqDeviceStale.inSeconds)
+          d,
       PqDevice(
-          id: deviceId,
-          version: version,
-          seenAt: nowSec,
-          postQuantumCapable: capable,
-          layeredCapable: layered),
+        id: deviceId,
+        version: version,
+        seenAt: nowSec,
+        postQuantumCapable: capable,
+        layeredCapable: layered,
+      ),
     ];
     out.sort((a, b) => b.seenAt.compareTo(a.seenAt));
     return out.length > max ? out.sublist(0, max) : out;
@@ -542,13 +596,13 @@ class PqPmPlan {
     final announced = recipientAcceptsLayered ? recipientKemKey : null;
 
     // Newer evidence decides between announcement and Bitchat traffic; untimed Bitchat evidence reads as older.
-    final bitchatIsCurrent = knownBitchat &&
+    final bitchatIsCurrent =
+        knownBitchat &&
         bitchatSeenAtSec > 0 &&
         !(announcedAtSec > 0 && announcedAtSec >= bitchatSeenAtSec);
 
     // A live sealable key settles it: their `v2:` wrap was their Nymchat client dual-sending, not Bitchat.
-    final bitchat =
-        announced != null ? false : (bitchatIsCurrent || !proven);
+    final bitchat = announced != null ? false : (bitchatIsCurrent || !proven);
 
     // Never pair a post-quantum wrap with a Bitchat copy of the same plaintext.
     final usableKem = bitchat ? null : announced;

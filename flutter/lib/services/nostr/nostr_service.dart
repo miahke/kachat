@@ -2066,7 +2066,14 @@ class NostrService {
     var senderVerified = true;
     var emitRumor = rumor;
     if (isBitchat) {
-      senderVerified = false;
+      // A matching, valid sender-signed seal authenticates the claimed author.
+      // Legacy ephemeral seals remain accepted but unverified.
+      if (seal.pubkey == rumorPubkey) {
+        if (!(await _verifier.verify(seal))) return;
+        senderVerified = true;
+      } else {
+        senderVerified = false;
+      }
       // Decode `bitchat1:` rumor content to text as the PWA does; drop receipt payloads.
       final decoded = _decodeBitchatRumor(rumor);
       if (decoded == null) return;
@@ -2608,32 +2615,49 @@ class NostrService {
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final expiration = settings.expirationFor(nowSec);
 
-    // bitchat wrap: relay-only, never deposited, and no expiration tag since bitchat rejects extra tags.
-    if (bitchatRumors.isNotEmpty && recipientPubkey != identity.pubkey) {
+    // Build all supported recipient formats before queueing any of them. A
+    // retry after a partial build must not publish duplicate, freshly wrapped
+    // copies. Remote signers cannot produce the Bitchat format.
+    final bitchatWraps = <NostrEvent>[];
+    if (signer is LocalSigner && recipientPubkey != identity.pubkey) {
       for (final r in bitchatRumors) {
-        final bwrap = await _buildBitchatWrap(r, recipientPubkey);
-        if (bwrap != null) publishDmQueued(bwrap, tier: rumorTier(r, 1));
+        final wrap = await _buildBitchatWrap(r, recipientPubkey);
+        if (wrap == null) return false;
+        bitchatWraps.add(wrap);
       }
     }
-
-    // Report NIP-17 wraps for archive and deposit at send time; deposit is an offline peer's only delivery in pool mode.
+    NostrEvent? recipientWrap;
     if (sendNymWrap) {
-      final recipientWrap = await _wrapAndPublish(rumor, recipientPubkey,
+      recipientWrap = await _buildWrap(rumor, recipientPubkey,
           expiration: expiration,
           recipientKemPublicKey: recipientKemPublicKey,
           layered: recipientLayered,
-          extraTags: wrapTags,
-          queuedKey: queuedKey);
-      if (recipientWrap != null) onWrap?.call(recipientWrap);
+          extraTags: wrapTags);
+      if (recipientWrap == null) return false;
     }
+    if (recipientWrap == null && bitchatWraps.isEmpty) return false;
+    NostrEvent? selfWrap;
     if (recipientPubkey != identity.pubkey) {
-      // Self-copy is post-quantum whenever we are, so the archive isn't the weak link.
-      final selfWrap = await _wrapAndPublish(rumor, identity.pubkey,
+      selfWrap = await _buildWrap(rumor, identity.pubkey,
           expiration: expiration,
           recipientKemPublicKey: selfKemPublicKey,
           layered: selfLayered,
           extraTags: wrapTags);
-      if (selfWrap != null) onWrap?.call(selfWrap);
+    }
+    for (var i = 0; i < bitchatWraps.length; i++) {
+      if (queuedKey != null) {
+        QueuedSends.instance.register(bitchatWraps[i].id, queuedKey);
+      }
+      publishDmQueued(bitchatWraps[i], tier: rumorTier(bitchatRumors[i], 1));
+    }
+    if (recipientWrap != null) {
+      if (queuedKey != null) QueuedSends.instance.register(recipientWrap.id, queuedKey);
+      publishDmQueued(recipientWrap, tier: rumorTier(rumor, 1));
+      onWrap?.call(recipientWrap);
+    }
+    if (selfWrap != null) {
+      publishDmQueued(selfWrap, tier: rumorTier(rumor, 1));
+      onWrap?.call(selfWrap);
     }
     return true;
   }

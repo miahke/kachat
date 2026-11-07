@@ -74,4 +74,47 @@ void main() {
       outbox.dispose();
     });
   });
+  test('zero sends stop after bounded retries', () {
+    fakeAsync((clock) {
+      var sends = 0;
+      final outbox = DmOutbox(
+        send: (_) async {
+          sends++;
+          return 0;
+        },
+        now: () =>
+            DateTime.fromMillisecondsSinceEpoch(clock.elapsed.inMilliseconds),
+        maxTries: 2,
+        retryWait: const Duration(seconds: 1),
+      );
+      outbox.push(event());
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(seconds: 10));
+      expect(sends, 3);
+      expect(outbox.failed, 1);
+      expect(outbox.unsentCount, 0);
+      outbox.dispose();
+    });
+  });
+
+  test('duplicate push while send is in flight is ignored', () {
+    fakeAsync((clock) {
+      final result = Completer<int>();
+      var sends = 0;
+      final outbox = DmOutbox(
+        send: (_) {
+          sends++;
+          return result.future;
+        },
+      );
+      outbox.push(event());
+      outbox.push(event());
+      expect(sends, 1);
+      result.complete(1);
+      clock.flushMicrotasks();
+      outbox.confirm('x');
+      expect(outbox.unsentCount, 0);
+      outbox.dispose();
+    });
+  });
 }

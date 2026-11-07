@@ -172,6 +172,14 @@ class PmLogic {
     'type',
   };
 
+  static bool senderAllowed({required bool verified, required String scope,
+      required bool isFriend, required bool hasBlockedUsers}) {
+    if (scope == 'disabled') return false;
+    if (!verified && hasBlockedUsers) return false;
+    if (scope == 'friends' && (!verified || !isFriend)) return false;
+    return true;
+  }
+
   static bool unverifiedWrapAllowed(Map<String, dynamic> rumor,
       {required String selfPubkey}) {
     if ((rumor['kind'] as num?)?.toInt() != EventKind.dmRumor) return false;

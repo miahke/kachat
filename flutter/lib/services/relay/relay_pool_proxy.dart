@@ -1293,6 +1293,8 @@ class RelayPoolProxy implements PoolTransport {
 
   /// Global cross-shard event dedup (PWA cap 10k).
   final EventDeduper _deduper = EventDeduper(maxIds: 10000);
+  final Map<String, int> _dedupGenerations = {};
+  int _nextDedupGeneration = 0;
 
   /// Pool-owned traffic counters: bytes from shard sockets, events and latency from [_onShardMessage].
   final RelayStats _stats = RelayStats();
@@ -1507,6 +1509,8 @@ class RelayPoolProxy implements PoolTransport {
   @override
   Subscription subscribe(List<NostrFilter> filters, {String? subId}) {
     final id = subId ?? generateSubId(_rng);
+    final generation = ++_nextDedupGeneration;
+    _dedupGenerations[id] = generation;
     final sub = Subscription.forTransport(
       id,
       this,
@@ -1514,7 +1518,7 @@ class RelayPoolProxy implements PoolTransport {
       max(1, openShardCount),
       eoseQuorum: eoseQuorum,
       eoseTimeout: eoseTimeout,
-      onRejected: (event) => _deduper.forget(copyKey(event)),
+      onRejected: (event) => _deduper.forget('$generation:${copyKey(event)}'),
     );
     _subscriptions[id] = sub;
     _activeFilters[id] = filters;
@@ -1533,6 +1537,7 @@ class RelayPoolProxy implements PoolTransport {
   @override
   void closeSubscription(Subscription sub) {
     _subscriptions.remove(sub.subId);
+    _dedupGenerations.remove(sub.subId);
     _activeFilters.remove(sub.subId);
     _reqSentAt.remove(sub.subId);
     _eosedShards.remove(sub.subId);
@@ -1617,6 +1622,7 @@ class RelayPoolProxy implements PoolTransport {
     _stopSampler();
     _stopLiveness();
     _subscriptions.clear();
+    _dedupGenerations.clear();
     _activeFilters.clear();
     _reqSentAt.clear();
     _eosedShards.clear();
@@ -1958,8 +1964,9 @@ class RelayPoolProxy implements PoolTransport {
         // Record before dedup, since the discarded copies are the relay list.
         eventProvenance.record(event, sourceRelay);
         // Cross-shard dedup: the first shard to deliver an id wins.
-        if (!_deduper.add(copyKey(event))) return;
         final eventSubId = _parentSubId(subId);
+        final generation = _dedupGenerations[eventSubId];
+        if (generation == null || !_deduper.add('$generation:${copyKey(event)}')) return;
         // Post-dedup event accounting.
         _stats.totalEvents++;
         _stats.eventsThisSecond++;

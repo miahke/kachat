@@ -570,13 +570,13 @@ class RelayConnection {
         OkMessage(event.id, false, 'not connected'),
       );
     }
-    return completer.future.timeout(
-      publishTimeout,
-      onTimeout: () {
-        _pendingPublishes.remove(event.id);
-        return OkMessage(event.id, false, 'timeout');
-      },
-    );
+    final timer = Timer(publishTimeout, () {
+      if (!identical(_pendingPublishes[event.id], completer)) return;
+      _pendingPublishes.remove(event.id);
+      completer.complete(OkMessage(event.id, false, 'timeout'));
+    });
+    completer.future.then((_) => timer.cancel());
+    return completer.future;
   }
 
   void retire() {

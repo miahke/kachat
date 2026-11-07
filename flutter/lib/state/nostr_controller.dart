@@ -2687,7 +2687,7 @@ class NostrController {
   void _maybeNotifyMessage(Message m,
       {required bool isGroup, int? alertCutoffMs}) {
     final appState = _ref.read(appStateProvider);
-    if (m.slowHeld) return;
+    if (m.slowHeld || m.senderVerified == false) return;
     if (!m.isOwn && appState.isMessageFiltered(m)) return;
     final mention = _refersToSelf(m.content) ||
         (isGroup && _ref.read(groupToolsProvider).mentionsAll(m));
@@ -4044,7 +4044,7 @@ class NostrController {
       return;
     }
     _settleStandaloneSender(u, self);
-    if (sender != null && sender.isNotEmpty && sender != self) {
+    if (u.senderVerified && sender != null && sender.isNotEmpty && sender != self) {
       if (u.isBitchat) {
         // With its timestamp, so older evidence can't win against the peer's announcement.
         _noteBitchatFormatSeen(
@@ -4673,9 +4673,13 @@ class NostrController {
     // Enforce "Who can PM you"; our own self-copy is always kept.
     if (!m.isOwn) {
       final scope = _ref.read(settingsProvider).acceptPMs;
-      if (scope == 'disabled') return;
-      if (scope == 'friends' &&
-          !_ref.read(appStateProvider).isFriend(m.pubkey)) {
+      final state = _ref.read(appStateProvider);
+      if (!PmLogic.senderAllowed(
+        verified: u.senderVerified,
+        scope: scope,
+        isFriend: state.isFriend(m.pubkey),
+        hasBlockedUsers: state.blockedUsers.isNotEmpty,
+      )) {
         return;
       }
     }
@@ -6926,11 +6930,13 @@ class NostrController {
                   ['nymthread', entry.threadRoot!],
               ],
             );
-            await _publishDualPm(
+            final queued = await _publishDualPm(
               rumor: rumor,
               recipientPubkey: entry.target,
               onWrap: _archiveSentWrap,
+              queuedKey: part.messageId,
             );
+            if (!queued) return false;
           }
           return true;
       }
@@ -7402,11 +7408,12 @@ class NostrController {
   /// Ingests a verified `nym-pq` announcement.
   void _ingestPqAnnouncement(NostrEvent event) {
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    _pqRegistry.ingest(event.pubkey, event.content,
+    final accepted = _pqRegistry.ingest(event.pubkey, event.content,
         nowSec: nowSec, createdAt: event.createdAt);
+    if (!accepted) return;
     if (event.pubkey == _identity?.pubkey) {
       final ann = PqAnnouncement.parse(event.content);
-      if (ann != null && !ann.retracted) {
+      if (ann != null && !ann.retracted && ann.expiresAt > nowSec) {
         // A new device on the account changes the seal policy immediately.
         _pqDevices = ann.devices;
         _refreshPqSealPolicy();
@@ -8185,7 +8192,7 @@ class NostrController {
   }
 
   /// Publishes a PM in the formats the peer understands: Bitchat, NIP-17, or both when unknown; self-copy is NIP-17.
-  Future<void> _publishDualPm({
+  Future<bool> _publishDualPm({
     required UnsignedEvent rumor,
     required String recipientPubkey,
     void Function(NostrEvent wrap)? onWrap,
@@ -8193,7 +8200,7 @@ class NostrController {
   }) async {
     final service = _service;
     final identity = _identity;
-    if (service == null || identity == null) return;
+    if (service == null || identity == null) return false;
 
     // Look up the announcement once before deciding; a lookup failure must never abort the send.
     try {
@@ -8233,7 +8240,7 @@ class NostrController {
     }
 
     final supportToken = pmSupportTokenFor(recipientPubkey);
-    await service.publishPM(
+    return service.publishPM(
       rumor: PmLogic.withSupportToken(rumor, supportToken),
       recipientPubkey: recipientPubkey,
       settings: _msgSettings,

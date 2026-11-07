@@ -46,3 +46,5 @@ Modified 2026-11-05: validate qWDTT subscription ports in the admin API and Tele
 Modified 2026-11-06: simplify the introductory tutorial and settings presentation, share notification sound selection, and show the selected network route in the sidebar.
 
 Modified 2026-11-06: improve message delivery and mesh handling, protect persistent message queues, and correct Tor validation and connection handling.
+
+Modified 2026-11-07: harden message sender verification, PQ key ordering and signature caching, mesh outbox construction, relay retry limits and subscription isolation. Nym protocol identifiers and original attribution are retained.
