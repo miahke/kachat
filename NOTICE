@@ -52,3 +52,5 @@ Modified 2026-11-07: harden message sender verification, PQ key ordering and sig
 Modified 2026-11-08: added optional Android Rust acceleration for Nostr event identifiers, retaining Dart fallback and Nym canonical serialization.
 
 Modified 2026-11-08: added optional Rust-backed Nostr event ID calculation and mesh fragment payload processing with Dart fallbacks.
+
+Rust dependency license texts are provided in third_party/rust-licenses/.
