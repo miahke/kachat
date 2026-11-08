@@ -50,3 +50,5 @@ Modified 2026-11-06: improve message delivery and mesh handling, protect persist
 Modified 2026-11-07: harden message sender verification, PQ key ordering and signature caching, mesh outbox construction, relay retry limits and subscription isolation. Nym protocol identifiers and original attribution are retained.
 
 Modified 2026-11-08: added optional Android Rust acceleration for Nostr event identifiers, retaining Dart fallback and Nym canonical serialization.
+
+Modified 2026-11-08: added optional Rust-backed Nostr event ID calculation and mesh fragment payload processing with Dart fallbacks.

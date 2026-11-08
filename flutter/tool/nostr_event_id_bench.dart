@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
-import '../lib/core/crypto/native_event_id_ffi.dart';
+import 'package:nym_bar/core/crypto/native_event_id_ffi.dart';
 
 void main() {
   final n = NativeEventId.forTesting(
@@ -24,9 +24,13 @@ void main() {
   String r() => n.compute('a' * 64, 1700000000, 1, tags, content)!;
   if (d() != r()) throw StateError('mismatch');
   for (final f in [d, r]) {
-    for (var i = 0; i < 5000; i++) f();
+    for (var i = 0; i < 5000; i++) {
+      f();
+    }
     final w = Stopwatch()..start();
-    for (var i = 0; i < 50000; i++) f();
-    print('${w.elapsedMicroseconds / 50000} us/op');
+    for (var i = 0; i < 50000; i++) {
+      f();
+    }
+    stdout.writeln('${w.elapsedMicroseconds / 50000} us/op');
   }
 }

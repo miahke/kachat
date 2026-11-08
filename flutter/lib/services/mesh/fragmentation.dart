@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'mesh_constants.dart';
+import 'native_fragment.dart';
 import 'protocol/bitchat_packet.dart';
 import 'protocol/fragment_payload.dart';
 import 'protocol/mesh_message_type.dart';
@@ -48,9 +49,11 @@ class PacketFragmenter {
     // bitchat caps reassembly at 256 fragments per id.
     if (chunks.length > 256) return const [];
 
+    final nativePayloads =
+        NativeFragment.split(fullData, fragmentID, maxDataSize, packet.type);
     final out = <BitchatPacket>[];
     for (var i = 0; i < chunks.length; i++) {
-      final payload = FragmentPayload(
+      final payload = nativePayloads?[i] ?? FragmentPayload(
         fragmentID: fragmentID,
         index: i,
         total: chunks.length,

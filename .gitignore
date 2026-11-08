@@ -22,3 +22,7 @@ flutter/android/.kotlin/
 .env
 .env.local
 **/__pycache__/
+
+# Rust prototype build artifacts
+rust-prototypes/mesh_frag/crate/target/
+rust-prototypes/mesh_frag/dart_baseline/.dart_tool/
