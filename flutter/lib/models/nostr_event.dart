@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart' show sha256;
 
+import '../core/crypto/native_event_id.dart';
+
 /// A Nostr event (NIP-01).
 class NostrEvent {
   NostrEvent({
@@ -28,14 +30,15 @@ class NostrEvent {
 
   /// NIP-01 event id: sha256 of `[0, pubkey, created_at, kind, tags, content]`.
   String computeId() {
-    final serialized = jsonEncode([
-      0,
+    final native = NativeEventId.instance?.compute(
       pubkey,
       createdAt,
       kind,
       tags,
       content,
-    ]);
+    );
+    if (native != null) return native;
+    final serialized = jsonEncode([0, pubkey, createdAt, kind, tags, content]);
     final digest = sha256.convert(utf8.encode(serialized));
     return digest.toString();
   }
@@ -51,14 +54,14 @@ class NostrEvent {
       tags.where((t) => t.isNotEmpty && t[0] == name);
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'pubkey': pubkey,
-        'created_at': createdAt,
-        'kind': kind,
-        'tags': tags,
-        'content': content,
-        'sig': sig,
-      };
+    'id': id,
+    'pubkey': pubkey,
+    'created_at': createdAt,
+    'kind': kind,
+    'tags': tags,
+    'content': content,
+    'sig': sig,
+  };
 
   factory NostrEvent.fromJson(Map<String, dynamic> j) {
     return NostrEvent(
@@ -115,14 +118,22 @@ class UnsignedEvent {
   final String content;
 
   Map<String, dynamic> toJson() => {
-        'pubkey': pubkey,
-        'created_at': createdAt,
-        'kind': kind,
-        'tags': tags,
-        'content': content,
-      };
+    'pubkey': pubkey,
+    'created_at': createdAt,
+    'kind': kind,
+    'tags': tags,
+    'content': content,
+  };
 
   String computeId() {
+    final native = NativeEventId.instance?.compute(
+      pubkey,
+      createdAt,
+      kind,
+      tags,
+      content,
+    );
+    if (native != null) return native;
     final serialized = jsonEncode([0, pubkey, createdAt, kind, tags, content]);
     return sha256.convert(utf8.encode(serialized)).toString();
   }
