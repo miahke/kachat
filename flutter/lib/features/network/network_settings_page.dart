@@ -35,7 +35,7 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Активный маршрут: ${switch (c.route) {
+                    'Способ подключения: ${switch (c.route) {
                       'TOR' => 'Tor',
                       'VK' => 'qWDTT',
                       'PROXY' => 'HTTP / SOCKS5',
@@ -70,7 +70,7 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
                     ),
                   if (c.selected)
                     const Text(
-                      'При отказе прокси прямое подключение не включается автоматически.',
+                      'При сбое выбранного маршрута прямое подключение не включается. При его отключении вручную приложение переключится на прямое подключение.',
                     ),
                   if (c.selected && c.state == 'READY')
                     TextButton.icon(
@@ -91,7 +91,7 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
               leading: const Icon(Icons.shield_outlined),
               title: const Text('Tor'),
               subtitle: const Text(
-                'Свои мосты obfs4 и WebTunnel или Snowflake без аккаунта. Статус загрузки сети в процентах.',
+                'Обход блокировок без аккаунта. Внутри можно выбрать мосты и посмотреть ход подключения.',
               ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.push(
@@ -106,7 +106,7 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
               leading: const Icon(Icons.router_outlined),
               title: const Text('qWDTT · VK TURN'),
               subtitle: const Text(
-                'Ключ подключения, WireGuard / Raw v2, вход VK, сервер и подписки.',
+                'Подключение через свой сервер. Настройки ключа, VK TURN и сервера внутри.',
               ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.push(
@@ -122,9 +122,9 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             child: ListTile(
               key: const Key('network-proxy'),
               leading: const Icon(Icons.vpn_key_outlined),
-              title: const Text('HTTP / HTTPS / SOCKS5'),
+              title: const Text('Прокси'),
               subtitle: const Text(
-                'Свой прокси или импорт ссылки, включая Telegram SOCKS.',
+                'Подключение через свой HTTP, HTTPS или SOCKS5-прокси. Можно вставить ссылку.',
               ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.push(
@@ -136,15 +136,17 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             ),
           ),
           const SizedBox(height: 16),
-          OutlinedButton.icon(
-            key: const Key('network-direct'),
-            onPressed: c.busy ? null : () => c.command('direct'),
-            icon: const Icon(Icons.public),
-            label: const Text('Включить прямое подключение'),
-          ),
-          const Text(
-            'Этот вариант отключает Tor, qWDTT и внешний прокси. Соединения устанавливаются непосредственно с серверами приложения.',
-          ),
+          if (c.selected) ...[
+            OutlinedButton.icon(
+              key: const Key('network-direct'),
+              onPressed: c.busy ? null : () => c.command('direct'),
+              icon: const Icon(Icons.public),
+              label: const Text('Включить прямое подключение'),
+            ),
+            const Text(
+              'Этот вариант отключает Tor, qWDTT и внешний прокси. Соединения устанавливаются непосредственно с серверами приложения.',
+            ),
+          ],
           if (c.error != null)
             Text(
               c.error!,

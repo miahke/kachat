@@ -84,16 +84,24 @@ class BootViewRestore {
   }
 
   void _open(ChatView view, {required bool ensurePm}) {
-    switch (view.kind) {
-      case ViewKind.channel:
-        _appState.switchChannel(view.id);
-      case ViewKind.pm:
-        if (ensurePm && view.id != kNymbotPubkey) {
-          _appState.ensurePMConversation(view.id);
-        }
-        _appState.switchView(view);
-      case ViewKind.group:
-        _appState.switchView(view);
+    void select() {
+      switch (view.kind) {
+        case ViewKind.channel:
+          _appState.switchChannel(view.id);
+        case ViewKind.pm:
+          if (ensurePm && view.id != kNymbotPubkey) {
+            _appState.ensurePMConversation(view.id);
+          }
+          _appState.switchView(view);
+        case ViewKind.group:
+          _appState.switchView(view);
+      }
+    }
+    // An explicit request, such as a notification, should show its chat.
+    if (ensurePm) {
+      select();
+    } else {
+      _appState.restoreBootView(select);
     }
   }
 }

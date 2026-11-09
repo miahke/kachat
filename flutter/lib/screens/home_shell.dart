@@ -45,8 +45,6 @@ import '../widgets/sidebar/list_swipe_back.dart';
 import '../widgets/sidebar/sidebar.dart';
 import '../widgets/wallpaper/wallpaper_layer.dart';
 
-final chatListLandingProvider = StateProvider<bool>((ref) => false);
-
 const double _kMouseClickSlop = 4;
 
 /// Responsive shell: two panes above 1024px, else a 300px off-canvas drawer; call UI mounts above everything.
@@ -112,6 +110,7 @@ class HomeShellState extends ConsumerState<HomeShell>
 
   void _onViewSwitch() {
     _lastPageMesh = false;
+    if (ref.read(appStateProvider.notifier).restoringBootView) return;
     if (_phone && _drawerOpen && mounted) setState(() => _drawerOpen = false);
   }
 
@@ -126,11 +125,13 @@ class HomeShellState extends ConsumerState<HomeShell>
     super.didChangeDependencies();
     if (_landingChecked) return;
     _landingChecked = true;
-    if (!ref.read(chatListLandingProvider)) return;
-    if (MediaQuery.sizeOf(context).width <= kPhoneMax) _drawerOpen = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) ref.read(chatListLandingProvider.notifier).state = false;
-    });
+    final app = ref.read(appStateProvider.notifier);
+    // Open the conversation list on an ordinary narrow-screen launch, while
+    // keeping an explicit navigation request (for example, a notification).
+    if (MediaQuery.sizeOf(context).width <= NymDimens.tabletBreakpoint &&
+        (app.viewSwitchCount == 0 || app.lastSwitchWasBootRestore)) {
+      _drawerOpen = true;
+    }
   }
 
   void _closeChatList() {

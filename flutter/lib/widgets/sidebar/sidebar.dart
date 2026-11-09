@@ -78,6 +78,12 @@ import '../../core/theme/nym_a11y.dart';
 
 enum _SectionId { channels, pms, nyms }
 
+const _defaultSectionOrder = [
+  _SectionId.pms,
+  _SectionId.channels,
+  _SectionId.nyms,
+];
+
 extension _SectionIdName on _SectionId {
   /// Matches the PWA `data-section` values.
   String get id => switch (this) {
@@ -185,7 +191,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
   @override
   void initState() {
     super.initState();
-    _order = List.of(_SectionId.values);
+    _order = List.of(_defaultSectionOrder);
     _skelTimer = Timer(const Duration(seconds: 8), () {
       if (mounted) setState(() => _skelTimedOut = true);
     });
@@ -227,7 +233,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
       for (final s in stored) {
         if (!next.contains(s)) next.add(s);
       }
-      for (final s in _SectionId.values) {
+      for (final s in _defaultSectionOrder) {
         if (!next.contains(s)) next.add(s);
       }
       _order = next;

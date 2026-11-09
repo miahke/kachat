@@ -55,6 +55,16 @@ class FakeQwdtt extends QwdttController {
 }
 
 void main() {
+  testWidgets('stopping qWDTT explicitly selects direct connection', (
+    tester,
+  ) async {
+    final controller = FakeQwdtt()..ready = true;
+    await tester.pumpWidget(
+      MaterialApp(home: QwdttPage(controller: controller)),
+    );
+    await tester.tap(find.text('Выключить qWDTT'));
+    expect(controller.calls.single.$1, 'direct');
+  });
   testWidgets('worker slider preserves all selected channels on save', (
     tester,
   ) async {
@@ -262,6 +272,8 @@ void main() {
     expect(find.text('qWDTT · Выбран Tor'), findsOneWidget);
     expect(find.byIcon(Icons.check_circle), findsNothing);
     expect(find.textContaining('2/2'), findsNothing);
+    expect(find.text('Выключить qWDTT'), findsNothing);
+    expect(find.textContaining('Сейчас выбран другой способ'), findsOneWidget);
   });
 
   testWidgets('sharing is explicit and explains included secrets before copy', (
