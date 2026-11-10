@@ -63,6 +63,8 @@ class StorageKeys {
   static const wallpaperType = 'nym_wallpaper_type';
   static const wallpaperCustomUrl = 'nym_wallpaper_custom_url';
   static const lowDataMode = 'nym_low_data_mode';
+  static const selectedGeoTopicsOnly = 'kachat_selected_geo_topics_only';
+  static const selectedGeoTopics = 'kachat_selected_geo_topics';
   static const relayDirectMode = 'nym_relay_direct_mode';
   static const relayDirectAck = 'nym_relay_direct_ack';
   static const relayFallbackNoticeOff = 'nym_relay_fallback_notice_off';

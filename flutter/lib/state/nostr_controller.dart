@@ -934,7 +934,10 @@ class NostrController {
 
       // Mirror Low Data Mode onto the relay layer whenever it flips, including via sync.
       settings.onLowDataModeChanged =
-          (enabled) => unawaited(_service?.setLowDataMode(enabled));
+          (enabled) => unawaited(_service?.setLowDataMode(
+              enabled || _ref.read(settingsProvider).selectedGeoTopicsOnly));
+
+      settings.onGeoTopicSelectionChanged = _onGeoTopicSelectionChanged;
 
       // Flip the critical REQ's channel-mode gate; the resubscribe is debounced.
       settings.onGroupChatPMOnlyModeChanged = _onGroupChatPMOnlyModeChanged;
@@ -988,7 +991,8 @@ class NostrController {
       final restoredView = bootView.apply();
       if (restoredView?.kind == ViewKind.channel) _persistJoinedChannels();
       // Seed Low Data Mode before the relay layer shards its geo relays.
-      if (_ref.read(settingsProvider).lowDataMode) {
+      if (_ref.read(settingsProvider).lowDataMode ||
+          _ref.read(settingsProvider).selectedGeoTopicsOnly) {
         unawaited(service.setLowDataMode(true));
       }
       // Critical REQ inputs from the hydrated caches, kept fresh via updateCriticalInputs.
@@ -1005,6 +1009,13 @@ class NostrController {
           onGlobalEmojiBlocks: _onGlobalEmojiBlocks,
         ),
         channelMode: !_ref.read(settingsProvider).groupChatPMOnlyMode,
+        selectedGeoTopicsOnly:
+            _ref.read(settingsProvider).selectedGeoTopicsOnly,
+        selectedGeoTopics: _ref.read(settingsProvider).selectedGeoTopics,
+        activeGeoTopic: bootState.view.kind == ViewKind.channel &&
+                isChannelGeohash(bootState.view.id)
+            ? bootState.view.id
+            : '',
         vouchAuthors: bootState.nymchatPubkeys,
         profileAuthors: [
           for (final c in bootState.pmConversations) c.pubkey,
@@ -1022,6 +1033,7 @@ class NostrController {
 
       // Seed the sidebar with the common channels.
       discoverChannels();
+      unawaited(_connectSelectedGeoRelays());
 
       // No-op on boot; kept for the one-hop vouch expansion.
       _subscribeVouches();
@@ -1104,6 +1116,31 @@ class NostrController {
     switchChannel(gh, geohash: isChannelGeohash(gh) ? gh : '');
     discoverChannels();
     unawaited(_restoreAllChannelArchives());
+  }
+
+  void _onGeoTopicSelectionChanged() {
+    final settings = _ref.read(settingsProvider);
+    if (!settings.selectedGeoTopicsOnly) {
+      _service?.cancelSelectedGeoRelaySync();
+    }
+    _service?.updateCriticalInputs(
+      selectedGeoTopicsOnly: settings.selectedGeoTopicsOnly,
+      selectedGeoTopics: settings.selectedGeoTopics,
+    );
+    unawaited(_service?.setLowDataMode(
+        settings.lowDataMode || settings.selectedGeoTopicsOnly) ?? Future.value());
+    unawaited(_connectSelectedGeoRelays());
+    if (settings.selectedGeoTopicsOnly) unawaited(_restoreAllChannelArchives());
+  }
+
+  Future<void> _connectSelectedGeoRelays() async {
+    final settings = _ref.read(settingsProvider);
+    if (!settings.selectedGeoTopicsOnly) return;
+    final view = _ref.read(appStateProvider).view;
+    await _service?.syncSelectedGeoRelays([
+      ...settings.selectedGeoTopics,
+      if (view.kind == ViewKind.channel && isChannelGeohash(view.id)) view.id,
+    ]);
   }
 
   ChatView? _latestPmOrGroupView() {
@@ -1502,13 +1539,17 @@ class NostrController {
       bool skipCovered = true}) async {
     await _discoverChannelActivity();
     if (_retired) return;
-    final keys = <String>{
-      for (final c in _ref.read(appStateProvider).channels) c.key,
-    };
-    final view = _ref.read(appStateProvider).view;
+    final state = _ref.read(appStateProvider);
+    final settings = _ref.read(settingsProvider);
+    final view = state.view;
     final open =
         view.kind == ViewKind.channel && view.id.isNotEmpty ? view.id : null;
-    if (open != null) keys.add(open);
+    final keys = channelKeysForGeoMode(
+      state.channels,
+      selectedOnly: settings.selectedGeoTopicsOnly,
+      selectedGeoTopics: settings.selectedGeoTopics.toSet(),
+      activeChannel: open,
+    );
     if (!paced) {
       await _backfillChannelArchivesFor(keys, force: force, sinceSec: sinceSec);
       return;
@@ -1585,6 +1626,16 @@ class NostrController {
       }
       for (final storageKey in _ref.read(appStateProvider).messages.keys) {
         if (storageKey.startsWith('#')) known.add(storageKey.substring(1));
+      }
+      final settings = _ref.read(settingsProvider);
+      if (settings.selectedGeoTopicsOnly) {
+        final selected = settings.selectedGeoTopics.toSet();
+        final view = _ref.read(appStateProvider).view;
+        if (view.kind == ViewKind.channel && isChannelGeohash(view.id)) {
+          selected.add(view.id.toLowerCase());
+        }
+        known.removeWhere(
+            (key) => isChannelGeohash(key) && !selected.contains(key));
       }
 
       // Failures already resolve to empty results.
@@ -1880,6 +1931,7 @@ class NostrController {
     settings.activePubkey = null;
     settings.onKeypairModeChanged = null;
     settings.onLowDataModeChanged = null;
+    settings.onGeoTopicSelectionChanged = null;
     settings.onGroupChatPMOnlyModeChanged = null;
     // The binding captured the old storage sync.
     _ref.read(appStateProvider.notifier).onViewOpened = null;
@@ -12022,6 +12074,10 @@ class NostrController {
   void switchChannel(String channel, {String geohash = ''}) {
     final appState = _ref.read(appStateProvider.notifier);
     appState.switchChannel(channel, geohash: geohash);
+    _service?.updateCriticalInputs(activeGeoTopic:
+        isChannelGeohash(geohash.isNotEmpty ? geohash : channel)
+            ? (geohash.isNotEmpty ? geohash : channel)
+            : '');
     _persistJoinedChannels();
     _subscribeActiveChannelTyping();
     // Connect the closest geo relays for a geohash channel.
@@ -13260,6 +13316,11 @@ class NostrController {
 
   /// Fetches the opened conversation's D1 archive (channels and groups; PMs restore at boot); best-effort.
   void _onViewOpened(ChatView view) {
+    _service?.updateCriticalInputs(activeGeoTopic:
+        view.kind == ViewKind.channel && isChannelGeohash(view.id)
+            ? view.id
+            : '');
+    unawaited(_connectSelectedGeoRelays());
     rememberLastView(_ref.read(keyValueStoreProvider), view);
     // Reading a conversation clears its bell entries without opening the modal.
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;

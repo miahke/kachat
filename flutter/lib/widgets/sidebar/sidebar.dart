@@ -128,6 +128,7 @@ class Sidebar extends ConsumerStatefulWidget {
 
 class _SidebarState extends ConsumerState<Sidebar> {
   Timer? _rowClock;
+  DateTime? _lastProfileCheck;
 
   final Set<_SectionId> _collapsed = {};
 
@@ -455,7 +456,13 @@ class _SidebarState extends ConsumerState<Sidebar> {
     ]);
   }
 
-  void _ensurePmProfiles() {
+  void _ensurePmProfiles({bool force = false}) {
+    final now = DateTime.now();
+    final last = _lastProfileCheck;
+    if (!force && last != null && now.difference(last) < const Duration(seconds: 5)) {
+      return;
+    }
+    _lastProfileCheck = now;
     ref
         .read(nostrControllerProvider)
         .ensureProfiles([for (final p in ref.read(pmListProvider)) p.pubkey]);
@@ -474,7 +481,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
         ref.watch(chatLockBadgesProvider.select((b) => b.shown));
     ref.listen(sidebarChannelRowsProvider, (_, _) => _syncNav());
     ref.listen(sidebarPmRowsProvider, (_, _) {
-      _ensurePmProfiles();
+      _ensurePmProfiles(force: true);
       _syncNav();
     });
     _ensurePmProfiles();

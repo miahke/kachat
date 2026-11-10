@@ -57,4 +57,6 @@ Modified 2026-11-09: brightened the existing kachat launcher artwork without cha
 
 Modified 2026-11-09: open the conversation list on ordinary narrow-screen launches, show private chats first by default, and switch to direct networking after a user explicitly stops Tor, qWDTT, or an external proxy. Automatic failures remain blocked from direct fallback.
 
+Modified 2026-11-10: add selected geotopic subscriptions and reduce repeated sidebar profile checks.
+
 Rust dependency license texts are provided in third_party/rust-licenses/.

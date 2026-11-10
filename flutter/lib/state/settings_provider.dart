@@ -9,6 +9,7 @@ import '../core/theme/nym_a11y.dart';
 import '../core/theme/nym_colors.dart';
 import '../core/theme/nym_theme.dart';
 import '../models/settings.dart';
+import '../models/channel.dart';
 import '../services/storage/key_value_store.dart';
 import '../services/attest/attest_badge.dart';
 import '../services/filter/filter_packs.dart';
@@ -502,6 +503,27 @@ class SettingsController extends StateNotifier<Settings> {
 
   void Function(bool enabled)? onLowDataModeChanged;
 
+  /// Device-local selection; never published with synced preferences.
+  void Function()? onGeoTopicSelectionChanged;
+
+  void setSelectedGeoTopicsOnly(bool enabled) {
+    if (state.selectedGeoTopicsOnly == enabled) return;
+    _kv.setBool(StorageKeys.selectedGeoTopicsOnly, enabled);
+    state = state.copyWith(selectedGeoTopicsOnly: enabled);
+    onGeoTopicSelectionChanged?.call();
+  }
+
+  void setGeoTopicSelected(String topic, bool selected) {
+    final key = topic.trim().toLowerCase();
+    if (!isValidGeohash(key) || key == 'nymchat') return;
+    final next = {...state.selectedGeoTopics};
+    if (selected ? !next.add(key) : !next.remove(key)) return;
+    final ordered = next.toList()..sort();
+    _kv.setString(StorageKeys.selectedGeoTopics, jsonEncode(ordered));
+    state = state.copyWith(selectedGeoTopics: List.unmodifiable(ordered));
+    onGeoTopicSelectionChanged?.call();
+  }
+
   void setLowDataMode(bool v) {
     _kv.setBool(StorageKeys.lowDataMode, v);
     state = state.copyWith(lowDataMode: v);
@@ -527,6 +549,10 @@ class SettingsController extends StateNotifier<Settings> {
     // Remote changes must still reach the relay layer.
     if (prev.lowDataMode != state.lowDataMode) {
       onLowDataModeChanged?.call(state.lowDataMode);
+    }
+    if (prev.selectedGeoTopicsOnly != state.selectedGeoTopicsOnly ||
+        jsonEncode(prev.selectedGeoTopics) != jsonEncode(state.selectedGeoTopics)) {
+      onGeoTopicSelectionChanged?.call();
     }
     if (prev.groupChatPMOnlyMode != state.groupChatPMOnlyMode) {
       onGroupChatPMOnlyModeChanged?.call(state.groupChatPMOnlyMode);
