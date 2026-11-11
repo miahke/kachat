@@ -884,6 +884,7 @@ const List<String> kAppStringsCatalog = <String>[
   'Online nyms in this channel: {names}',
   'Only PMs',
   'Only Selected Geotopics',
+  'Used for double-tap reactions and quick-react swipes. Choose an emoji from the picker.',
   'Receive geotopic messages from the selected topics below. An opened geotopic stays available while you read it. Turn this off to receive all geotopics.',
   'Only group chats',
   'Only notify for mentions in group chats',

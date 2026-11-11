@@ -416,24 +416,26 @@ class _MessagesListState extends ConsumerState<MessagesList> {
     }
 
     // Mention flags never apply to self or PM/group rows, nor while the self nym is still unknown.
-    final raw = <_ListEntry>[
+    final messageEntries = <_ListEntry>[
       for (final m in messages)
-        _MsgEntry(MessageGroupEntry(
-          message: m,
-          reactions: reactions[m.id] ?? const [],
-          mentioned: mentionToken.length > 1 &&
-              !m.isOwn &&
-              !m.isPM &&
-              m.content.contains(mentionToken),
-        )),
-      for (final p in polls) _PollEntry(p),
+        _MsgEntry(
+          MessageGroupEntry(
+            message: m,
+            reactions: reactions[m.id] ?? const [],
+            mentioned:
+                mentionToken.length > 1 &&
+                !m.isOwn &&
+                !m.isPM &&
+                m.content.contains(mentionToken),
+          ),
+        ),
     ];
-    final order = List<int>.generate(raw.length, (i) => i)
-      ..sort((a, b) {
-        final d = raw[a].createdAt.compareTo(raw[b].createdAt);
-        return d != 0 ? d : a - b;
-      });
-    final merged = [for (final i in order) raw[i]];
+    final pollEntries = <_ListEntry>[for (final p in polls) _PollEntry(p)];
+    final merged = mergeOrderedEntries(
+      messageEntries,
+      pollEntries,
+      (a, b) => a.createdAt.compareTo(b.createdAt),
+    );
 
     // Fold same-author bubble runs in merged order, so polls and system or `/me` rows break a run.
     final units = <_RenderUnit>[];
@@ -1386,4 +1388,44 @@ class _ListScrollBehavior extends ScrollBehavior {
       oldDelegate.mouse != mouse ||
       oldDelegate.light != light ||
       parent.shouldNotify(oldDelegate.parent);
+}
+
+/// Merge ordered inputs, preserving the original concatenation order on ties.
+/// Messages can be ordered by anchor time instead of creation time, so fall back
+/// to a stable sort when either input is not ordered by the merge comparator.
+@visibleForTesting
+List<T> mergeOrderedEntries<T>(
+  List<T> first,
+  List<T> second,
+  int Function(T, T) compare,
+) {
+  bool ordered(List<T> items) {
+    for (var i = 1; i < items.length; i++) {
+      if (compare(items[i - 1], items[i]) > 0) return false;
+    }
+    return true;
+  }
+
+  if (!ordered(first) || !ordered(second)) {
+    final all = [...first, ...second];
+    final indices = List<int>.generate(all.length, (i) => i)
+      ..sort((a, b) {
+        final order = compare(all[a], all[b]);
+        return order != 0 ? order : a.compareTo(b);
+      });
+    return [for (final i in indices) all[i]];
+  }
+  final result = <T>[];
+  var i = 0;
+  var j = 0;
+  while (i < first.length && j < second.length) {
+    if (compare(first[i], second[j]) <= 0) {
+      result.add(first[i++]);
+    } else {
+      result.add(second[j++]);
+    }
+  }
+  result.addAll(first.skip(i));
+  result.addAll(second.skip(j));
+  return result;
 }

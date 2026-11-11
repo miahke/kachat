@@ -3786,6 +3786,7 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer>
     if (own != null) return own;
     final url = proxiedMedia(it.url);
     return CachedNetworkImageProvider(url,
+        cacheManager: InlineNetworkImage.cacheManager,
         headers: InlineNetworkImage.imageHeadersFor(url));
   }
 
@@ -4020,6 +4021,7 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer>
     }
     return CachedNetworkImage(
       imageUrl: proxiedMedia(_item.url),
+      cacheManager: InlineNetworkImage.cacheManager,
       httpHeaders: InlineNetworkImage.imageHeadersFor(proxiedMedia(_item.url)),
       fit: BoxFit.contain,
       errorWidget: (_, _, _) =>

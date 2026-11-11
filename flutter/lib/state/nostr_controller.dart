@@ -86,6 +86,7 @@ import '../features/send_as/anon_lane.dart';
 import '../features/presence/nyms_online.dart';
 import '../features/send_as/send_as_service.dart';
 import '../features/send_as/send_as_transport.dart';
+import '../features/qwdtt/qwdtt_controller.dart';
 import '../features/settings/settings_helpers.dart' show LandingChannel;
 import '../services/filter/content_filter.dart';
 import '../services/filter/filter_packs.dart';
@@ -6197,8 +6198,7 @@ class NostrController {
       badge: badge,
       emojiTags: [
         ...sender.stash.emojiTagsFor(content),
-        ...media_notes.imetaTagsForContent(
-            content, _ref.read(mediaFallbacksProvider).fallbacksFor),
+        ..._mediaImetaTags(content),
         ...quoteTagsForContent(content),
       ],
       powDifficulty: sender.powDifficulty,
@@ -8458,10 +8458,17 @@ class NostrController {
         ..._ref
             .read(liveCustomEmojiProvider.notifier)
             .emojiTagsForContent(content, anon: anon),
-        ...media_notes.imetaTagsForContent(
-            content, _ref.read(mediaFallbacksProvider).fallbacksFor),
+        ..._mediaImetaTags(content),
         ...quoteTagsForContent(content),
       ];
+
+  List<List<String>> _mediaImetaTags(String content) {
+    final media = _ref.read(mediaFallbacksProvider);
+    return mergeImetaTags([
+      ...media_notes.imetaTagsForContent(content, media.fallbacksFor),
+      ...media.imetaTagsForContent(content),
+    ]);
+  }
 
   final Map<String, String> _quoteSources = <String, String>{};
 
@@ -16797,31 +16804,52 @@ class NostrController {
     final authHeader = blossomAuthHeader(
         hashHex, DateTime.now().millisecondsSinceEpoch ~/ 1000);
 
-    final api = ApiClient();
+    final routing = QwdttController.instance;
+    final session = routing.supported ? routing.beginMediaSession() : null;
+    if (routing.supported && session == null) {
+      lastUploadFailure = 'Network route unavailable';
+      return null;
+    }
+    ApiClient? attemptApi;
+    var sessionTransferred = false;
     try {
       final done = await _blossomUploader.upload(kBlossomServers, contentType,
           (server, type) async {
-        final data =
-            await api.uploadBlob(bytes, server, authHeader, contentType: type);
-        final url = data['url'];
-        return url is String ? url : null;
-      }, size: bytes.length);
-      if (done == null) {
-        lastUploadFailure = _blossomUploader.lastFailure;
+        final api = ApiClient();
+        attemptApi = api;
+        try {
+          final data = await api.uploadBlob(bytes, server, authHeader,
+              contentType: type, mediaSession: session);
+          final url = data['url'];
+          return url is String ? url : null;
+        } finally {
+          if (identical(attemptApi, api)) attemptApi = null;
+          api.dispose();
+        }
+      }, size: bytes.length, onTimeout: () {
+          session?.cancelActive();
+          attemptApi?.dispose();
+          attemptApi = null;
+        },
+          canContinue: session == null ? null : () => session.valid);
+      if (done == null || (session != null && !session.valid)) {
+        lastUploadFailure = session != null && !session.valid
+            ? 'Network route changed'
+            : _blossomUploader.lastFailure;
         return null;
       }
       lastUploadFailure = '';
       onProgress?.call(1.0);
       final fallbacks = _ref.read(mediaFallbacksProvider);
-      fallbacks.recordPredictedMirrors(done.url, [
-        for (final s in kBlossomServers)
-          if (s != done.server) predictMirrorUrl(s, hashHex, done.url),
-      ]);
-      unawaited(_mirrorBlobBackground(done.url, done.server, authHeader)
-          .then((mirrors) => fallbacks.recordConfirmedMirrors(done.url, mirrors)));
+      fallbacks.recordUpload(done.url, contentType);
+      sessionTransferred = session != null;
+      unawaited(_mirrorBlobBackground(done.url, done.server, authHeader, session)
+          .then((mirrors) => fallbacks.recordConfirmedMirrors(done.url, mirrors))
+          .whenComplete(() => session?.dispose()));
       return done.url;
     } finally {
-      api.dispose();
+      if (!sessionTransferred) session?.dispose();
+      attemptApi?.dispose();
     }
   }
 
@@ -16833,6 +16861,7 @@ class NostrController {
     String primaryUrl,
     String excludeServer,
     String authHeader,
+    MediaRouteSession? session,
   ) async {
     final remaining = kBlossomServers.where((s) => s != excludeServer).toList();
     final mirrors = <String>[];
@@ -16841,7 +16870,12 @@ class NostrController {
     try {
       await Future.wait(remaining.map((server) async {
         try {
-          final data = await api.mirrorBlob(primaryUrl, server, authHeader);
+          final data = await api.mirrorBlob(primaryUrl, server, authHeader,
+              mediaSession: session).timeout(const Duration(seconds: 30), onTimeout: () {
+            session?.cancelActive();
+            api.dispose();
+            throw TimeoutException('Blossom mirror timed out');
+          });
           final url = data['url'];
           if (url is String && url.isNotEmpty) mirrors.add(url);
         } catch (e) {

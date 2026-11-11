@@ -2636,18 +2636,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
         ),
-        // Only when a swipe action is Quick React.
-        if (s.swipeLeftAction == 'react' || s.swipeRightAction == 'react')
+      ],
           _GroupSpec(
-            text: tr(
-                'Quick React Emoji {emoji} Change Emoji always used when a '
-                'swipe gesture is set to "Quick React". Tap to choose from '
-                'the full emoji picker.',
-                {'emoji': s.swipeReactEmoji}),
+            text: tr('Quick React Emoji'),
             child: FormGroup(
               label: tr('Quick React Emoji'),
-              hint: tr('Emoji always used when a swipe gesture is set to '
-                  '"Quick React". Tap to choose from the full emoji picker.'),
+              hint: tr('Used for double-tap reactions and quick-react swipes. '
+                  'Choose an emoji from the picker.'),
               // A custom `:code:` preview renders as a 33x33 image; unicode uses the button's 22px font.
               child: Align(
                 alignment: Alignment.centerLeft,
@@ -2672,6 +2667,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
           ),
+      if (s.gesturesEnabled) ...[
         _GroupSpec(
           text: tr(
               'Swipe Sensitivity {options} How far you need to swipe before '

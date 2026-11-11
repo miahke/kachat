@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show HttpDate;
+import 'dart:io' show HttpClient, HttpDate;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -12,6 +13,7 @@ import '../../core/crypto/keys.dart' show bytesToHex, randomBytes;
 import '../../core/crypto/schnorr.dart' as schnorr;
 import '../../core/crypto/pow.dart';
 import '../../models/nostr_event.dart';
+import '../../features/qwdtt/qwdtt_controller.dart' show MediaRouteSession;
 import '../nostr/event_signer.dart';
 import '../relay/relay_stats.dart';
 import 'api_config.dart';
@@ -530,6 +532,7 @@ class ApiClient {
         _socketEnabled = apiSocket != null || apiSocketFactory != null;
 
   final http.Client _client;
+  final Set<HttpClient> _mediaClients = {};
   final String _baseUrl;
   final String _giphyApiKey;
 
@@ -953,32 +956,47 @@ class ApiClient {
       type == 'application/octet-stream' ||
       const ['image/', 'video/', 'audio/'].any(type.startsWith);
 
-  Map<String, String> _blossomHeaders(Uri uri, Map<String, String> extra) =>
-      ApiConfig.directMedia
-          ? {'User-Agent': ApiConfig.userAgentFor(uri), 'Accept': 'application/json', ...extra}
-          : _headers(extra);
-
   /// PUTs a Blossom blob via the proxy with a kind-24242 [authHeader]; returns the Blossom JSON.
   Future<Map<String, dynamic>> uploadBlob(
     Uint8List bytes,
     String server,
     String authHeader, {
     String contentType = 'application/octet-stream',
+    MediaRouteSession? mediaSession,
   }) async {
     final type = contentType.split(';').first.trim().toLowerCase();
     if (!blossomTypeAllowed(type)) {
       throw ApiException('upload', 415, 'Content type not allowed: $type');
     }
-    final uri = Uri.parse(blossomUploadUrl(server));
-    final res = await _client.put(
-      uri,
-      headers: _blossomHeaders(uri, {
-        'Authorization': authHeader,
-        'Content-Type': contentType,
-      }),
-      body: bytes,
-    );
-    if (!ApiConfig.directMedia) {
+    final direct = mediaSession?.direct ?? ApiConfig.directMedia;
+    final serverUri = Uri.tryParse(server);
+    if (mediaSession != null && direct && (serverUri?.scheme != 'https' ||
+        serverUri?.host.isEmpty != false || serverUri!.userInfo.isNotEmpty)) {
+      throw ApiException('upload', 400, 'HTTPS upload server required');
+    }
+    final uri = Uri.parse(direct ? '${server.replaceFirst(RegExp(r'/+$'), '')}/upload'
+        : '$_baseUrl?action=upload&server=${Uri.encodeComponent(server)}');
+    final rawClient = mediaSession?.createClient();
+    if (rawClient != null) _mediaClients.add(rawClient);
+    final client = rawClient == null ? _client : IOClient(rawClient);
+    late final http.Response res;
+    try {
+      final request = http.Request('PUT', uri)
+        ..followRedirects = mediaSession == null
+        ..headers.addAll(direct
+            ? {'User-Agent': ApiConfig.userAgentFor(uri), 'Accept': 'application/json'}
+            : _headers({}))
+        ..headers['Authorization'] = authHeader
+        ..headers['Content-Type'] = contentType
+        ..bodyBytes = bytes;
+      res = await http.Response.fromStream(await client.send(request));
+    } finally {
+      if (rawClient != null) {
+        _mediaClients.remove(rawClient);
+        mediaSession!.releaseClient(rawClient);
+      }
+    }
+    if (!direct) {
       _trackApiData('upload', sent: bytes.length, recv: _bodyLen(res.bodyBytes));
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -993,24 +1011,47 @@ class ApiClient {
   Future<Map<String, dynamic>> mirrorBlob(
     String sourceUrl,
     String server,
-    String authHeader,
-  ) async {
+    String authHeader, {
+    MediaRouteSession? mediaSession,
+  }) async {
     final payload = jsonEncode({'url': sourceUrl});
-    final uri = Uri.parse(blossomMirrorUrl(server));
-    final res = await _client.put(
-      uri,
-      headers: _blossomHeaders(uri, {
-        'Authorization': authHeader,
-        'Content-Type': 'application/json',
-      }),
-      body: payload,
-    );
-    if (!ApiConfig.directMedia) {
+    final direct = mediaSession?.direct ?? ApiConfig.directMedia;
+    final serverUri = Uri.tryParse(server);
+    if (mediaSession != null && direct && (serverUri?.scheme != 'https' ||
+        serverUri?.host.isEmpty != false || serverUri!.userInfo.isNotEmpty)) {
+      throw ApiException('mirror', 400, 'HTTPS mirror server required');
+    }
+    final uri = Uri.parse(direct ? '${server.replaceFirst(RegExp(r'/+$'), '')}/mirror'
+        : '$_baseUrl?action=mirror&server=${Uri.encodeComponent(server)}');
+    final rawClient = mediaSession?.createClient();
+    if (rawClient != null) _mediaClients.add(rawClient);
+    final client = rawClient == null ? _client : IOClient(rawClient);
+    late final http.Response res;
+    try {
+      final request = http.Request('PUT', uri)
+        ..followRedirects = mediaSession == null
+        ..headers.addAll(direct
+            ? {'User-Agent': ApiConfig.userAgentFor(uri), 'Accept': 'application/json'}
+            : _headers({}))
+        ..headers['Authorization'] = authHeader
+        ..headers['Content-Type'] = 'application/json'
+        ..body = payload;
+      res = await http.Response.fromStream(await client.send(request));
+    } finally {
+      if (rawClient != null) {
+        _mediaClients.remove(rawClient);
+        mediaSession!.releaseClient(rawClient);
+      }
+    }
+    if (!direct) {
       _trackApiData('mirror',
           sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw ApiException('mirror', res.statusCode, _utf8Body(res));
+    }
+    if (mediaSession != null && !mediaSession.valid) {
+      throw StateError('Media route changed');
     }
     return jsonDecode(_utf8Body(res)) as Map<String, dynamic>;
   }
@@ -1321,6 +1362,8 @@ class ApiClient {
 
   void dispose() {
     _socket?.dispose();
+    for (final client in _mediaClients.toList()) { client.close(force: true); }
+    _mediaClients.clear();
     _client.close();
   }
 }

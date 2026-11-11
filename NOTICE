@@ -59,4 +59,6 @@ Modified 2026-11-09: open the conversation list on ordinary narrow-screen launch
 
 Modified 2026-11-10: add selected geotopic subscriptions and reduce repeated sidebar profile checks.
 
+Modified 2026-11-12: refine message animations and gestures, optimize message list processing, and improve media upload and image routing.
+
 Rust dependency license texts are provided in third_party/rust-licenses/.

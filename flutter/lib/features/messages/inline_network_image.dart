@@ -8,6 +8,9 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+
+import 'routed_image_service.dart';
 import 'package:http/http.dart' as http;
 
 import '../../services/api/api_config.dart';
@@ -77,6 +80,10 @@ class _Decoded {
   final Uint8List? raster;
 }
 
+class _InlineImageCache extends CacheManager with ImageCacheManager {
+  _InlineImageCache(FileService service) : super(Config('kachatInlineImages', fileService: service));
+}
+
 /// Network image that handles SVG and degrades to [errorChild] without ever throwing.
 class InlineNetworkImage extends StatefulWidget {
   const InlineNetworkImage({
@@ -114,6 +121,9 @@ class InlineNetworkImage extends StatefulWidget {
 
   /// URL -> decoded result, so repeats share one fetch and bad URLs don't crash-loop.
   static final Map<String, Future<_Decoded?>> _cache = {};
+  static final _fileService = RoutedImageFileService(headersFor: imageHeadersFor);
+  static final _diskCache = _InlineImageCache(_fileService);
+  static BaseCacheManager get cacheManager => _diskCache;
 
   /// Raster bytes from the decode cache (fetching if [fetchIfMissing]); null for SVGs or misses.
   static Future<Uint8List?> resolveBytes(String url,
@@ -137,6 +147,9 @@ class InlineNetworkImage extends StatefulWidget {
     if (_cache.length > 1024) _cache.remove(_cache.keys.first);
     final fut = _fetchAndDecode(url);
     _cache[url] = fut;
+    fut.then((value) {
+      if (value == null && identical(_cache[url], fut)) _cache.remove(url);
+    });
     return fut;
   }
 
@@ -163,6 +176,7 @@ class InlineNetworkImage extends StatefulWidget {
   static void evict(String url) {
     if (url.isEmpty) return;
     _cache.remove(url);
+    unawaited(CachedNetworkImage.evictFromCache(url, cacheManager: _diskCache).catchError((_) => false));
     unawaited(CachedNetworkImage.evictFromCache(url).catchError((_) => false));
     unawaited(CachedNetworkImageProvider(url).evict().catchError((_) => false));
   }
@@ -170,9 +184,9 @@ class InlineNetworkImage extends StatefulWidget {
   static Future<_Decoded?> _fetchAndDecode(String url) async {
     Uint8List bytes;
     try {
-      final resp = await http
-          .get(Uri.parse(url), headers: imageHeadersFor(url))
-          .timeout(const Duration(seconds: 12));
+      final response = await _fileService.get(url, headers: imageHeadersFor(url));
+      final data = await response.content.timeout(const Duration(seconds: 12)).expand((chunk) => chunk).toList();
+      final resp = http.Response.bytes(data, response.statusCode);
       if (resp.statusCode != 200 || resp.bodyBytes.isEmpty) {
         assert(() {
           debugPrint('[img-fetch] status=${resp.statusCode} '
@@ -213,7 +227,7 @@ class InlineNetworkImage extends StatefulWidget {
     // SVGs only render through [_decode], so the compiled picture is the warm state.
     if (decoded == null || decoded.raster == null) return;
     final completer = Completer<void>();
-    final stream = CachedNetworkImageProvider(url, headers: imageHeadersFor(url))
+    final stream = CachedNetworkImageProvider(url, headers: imageHeadersFor(url), cacheManager: _diskCache)
         .resolve(ImageConfiguration.empty);
     late final ImageStreamListener listener;
     void done() {
@@ -472,6 +486,7 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
       return PausableAnimatedImage(
         image: CachedNetworkImageProvider(
           url,
+          cacheManager: InlineNetworkImage._diskCache,
           headers: InlineNetworkImage.imageHeadersFor(url),
           maxWidth: cacheWidth,
         ),
@@ -486,12 +501,14 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
     final cover = _coverDecode(
         context,
         CachedNetworkImageProvider(url,
+            cacheManager: InlineNetworkImage._diskCache,
             headers: InlineNetworkImage.imageHeadersFor(url)));
     if (cover != null) {
       return _coverImage(cover, filterQuality: FilterQuality.low, fadeIn: true);
     }
     return CachedNetworkImage(
       imageUrl: url,
+      cacheManager: InlineNetworkImage._diskCache,
       httpHeaders: InlineNetworkImage.imageHeadersFor(url),
       width: widget.width,
       height: widget.height,
