@@ -193,8 +193,10 @@ class _QwdttPageState extends State<QwdttPage> {
                       ),
                     const SizedBox(height: 12),
                     Text(
-                      controller.selected
-                          ? 'При остановке или ошибке интернет-трафик kachat заблокирован. Прямого переключения нет.'
+                      controller.selected && controller.route == 'VK'
+                          ? 'При сбое маршрута прямое подключение не включится. Если выключить qWDTT вручную, приложение переключится на прямое подключение.'
+                          : controller.selected
+                          ? 'Сейчас выбран другой способ подключения. Чтобы включить qWDTT, выберите сохранённый профиль.'
                           : 'Для обхода через VK TURN выберите сохранённый профиль и нажмите «Подключить».',
                     ),
                     if (controller.captchaPending)
@@ -224,23 +226,12 @@ class _QwdttPageState extends State<QwdttPage> {
                       if (controller.probeMessage != null)
                         Text(controller.probeMessage!),
                     ],
-                    if (controller.selected)
-                      Wrap(
-                        spacing: 8,
-                        children: [
-                          OutlinedButton(
-                            onPressed: controller.busy
-                                ? null
-                                : () => controller.command('disconnect'),
-                            child: const Text('Остановить туннель'),
-                          ),
-                          TextButton(
-                            onPressed: controller.busy
-                                ? null
-                                : () => controller.command('direct'),
-                            child: const Text('Включить прямое подключение'),
-                          ),
-                        ],
+                    if (controller.selected && controller.route == 'VK')
+                      OutlinedButton(
+                        onPressed: controller.busy
+                            ? null
+                            : () => controller.command('direct'),
+                        child: const Text('Выключить qWDTT'),
                       ),
                   ],
                 ),

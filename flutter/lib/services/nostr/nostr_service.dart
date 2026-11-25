@@ -672,12 +672,18 @@ class NostrService {
   Future<void> start(
     NostrHandlers handlers, {
     bool channelMode = true,
+    bool selectedGeoTopicsOnly = false,
+    Iterable<String> selectedGeoTopics = const [],
+    String activeGeoTopic = '',
     Iterable<String> vouchAuthors = const [],
     Iterable<String> profileAuthors = const [],
     Iterable<String> pqAuthors = const [],
   }) async {
     _handlers = handlers;
     _channelMode = channelMode;
+    _selectedGeoTopicsOnly = selectedGeoTopicsOnly;
+    _selectedGeoTopics = _sanitizeGeoTopics(selectedGeoTopics);
+    _activeGeoTopic = _sanitizeGeoTopics([activeGeoTopic]).firstOrNull ?? '';
     _vouchAuthors = _sanitizeVouchAuthors(vouchAuthors);
     _profileAuthors = List<String>.unmodifiable(profileAuthors);
     _pqAuthors = _sanitizeVouchAuthors(pqAuthors);
@@ -708,6 +714,22 @@ class NostrService {
 
   /// Gates every public-channel filter out of the critical set.
   bool _channelMode = true;
+
+  bool _selectedGeoTopicsOnly = false;
+  List<String> _selectedGeoTopics = const [];
+  String _activeGeoTopic = '';
+
+  List<String> _sanitizeGeoTopics(Iterable<String> topics) =>
+      List<String>.unmodifiable({
+        for (final topic in topics)
+          if (ch.isValidGeohash(topic.trim()) && topic.toLowerCase() != 'nymchat')
+            topic.trim().toLowerCase(),
+      }.toList()..sort());
+
+  List<String> get _liveGeoTopics => _sanitizeGeoTopics([
+        ..._selectedGeoTopics,
+        _activeGeoTopic,
+      ]);
 
   /// PQ key announcement authors, scoped to peers we actually message plus ourselves.
   List<String> _pqAuthors = const [];
@@ -748,7 +770,14 @@ class NostrService {
     ));
     // Channels: real-time `since`, two filters as in the PWA.
     if (channelMode) {
-      filters.add(NostrFilter(kinds: [EventKind.geoChannel], since: chSince));
+      final geos = _liveGeoTopics;
+      if (!_selectedGeoTopicsOnly || geos.isNotEmpty) {
+        filters.add(NostrFilter(
+          kinds: [EventKind.geoChannel],
+          since: chSince,
+          tags: _selectedGeoTopicsOnly ? {'g': geos} : const {},
+        ));
+      }
       filters.add(NostrFilter(kinds: [EventKind.namedChannel], since: chSince));
     }
     // Reactions on our channel messages; `#k` keeps out foreign kind-7s that merely p-tag us.
@@ -929,14 +958,41 @@ class NostrService {
   /// Updates critical-REQ inputs and debounces [resubscribeMain] when anything changed.
   void updateCriticalInputs({
     bool? channelMode,
+    bool? selectedGeoTopicsOnly,
+    Iterable<String>? selectedGeoTopics,
+    String? activeGeoTopic,
     Iterable<String>? vouchAuthors,
     Iterable<String>? profileAuthors,
     Iterable<String>? pqAuthors,
   }) {
     var changed = false;
+    var geoChanged = false;
     if (channelMode != null && channelMode != _channelMode) {
       _channelMode = channelMode;
       changed = true;
+      geoChanged = true;
+    }
+    if (selectedGeoTopicsOnly != null &&
+        selectedGeoTopicsOnly != _selectedGeoTopicsOnly) {
+      _selectedGeoTopicsOnly = selectedGeoTopicsOnly;
+      changed = true;
+      geoChanged = true;
+    }
+    if (selectedGeoTopics != null) {
+      final next = _sanitizeGeoTopics(selectedGeoTopics);
+      if (!listEquals(next, _selectedGeoTopics)) {
+        _selectedGeoTopics = next;
+        changed = true;
+        geoChanged = true;
+      }
+    }
+    if (activeGeoTopic != null) {
+      final next = _sanitizeGeoTopics([activeGeoTopic]).firstOrNull ?? '';
+      if (next != _activeGeoTopic) {
+        _activeGeoTopic = next;
+        changed = true;
+        geoChanged = true;
+      }
     }
     if (vouchAuthors != null) {
       final next = _sanitizeVouchAuthors(vouchAuthors);
@@ -959,7 +1015,14 @@ class NostrService {
         changed = true;
       }
     }
-    if (changed) scheduleCriticalResubscribe();
+    if (changed) {
+      scheduleCriticalResubscribe();
+      if (geoChanged) {
+        final oldPresence = _presenceSub;
+        _presenceSub = null;
+        if (oldPresence != null) unawaited(oldPresence.close());
+      }
+    }
     _syncPresenceSub();
   }
 
@@ -968,7 +1031,8 @@ class NostrService {
 
   void _syncPresenceSub() {
     final cur = _presenceSub;
-    if (_handlers == null || !_channelMode || _presencePaused) {
+    if (_handlers == null || !_channelMode || _presencePaused ||
+        (_selectedGeoTopicsOnly && _liveGeoTopics.isEmpty)) {
       _presenceSub = null;
       if (cur != null) unawaited(cur.close());
       return;
@@ -978,7 +1042,8 @@ class NostrService {
     final sub = pool.subscribe([
       NostrFilter(
           kinds: const [EventKind.geoPresence],
-          since: nowSec - GeoPresence.sinceWindowSec),
+          since: nowSec - GeoPresence.sinceWindowSec,
+          tags: _selectedGeoTopicsOnly ? {'g': _liveGeoTopics} : const {}),
     ]);
     markLiveSubscription(sub);
     sub.events.listen(_routeInbound, onError: (_) {});
@@ -3323,6 +3388,27 @@ class NostrService {
     }
     // Re-shard when a new geo relay was introduced, or always in low-data mode.
     if (changed || lowDataMode) applyGeoRelays();
+  }
+
+  int _selectedGeoRelaySyncEpoch = 0;
+
+  void cancelSelectedGeoRelaySync() => _selectedGeoRelaySyncEpoch++;
+
+  /// In selected mode, release relay sockets for geotopics no longer selected.
+  Future<void> syncSelectedGeoRelays(Iterable<String> topics) async {
+    final epoch = ++_selectedGeoRelaySyncEpoch;
+    final geos = _sanitizeGeoTopics(topics);
+    if (geos.isNotEmpty && geoRelays.isEmpty) await fetchGeoRelays();
+    if (epoch != _selectedGeoRelaySyncEpoch) return;
+    final next = <String>{
+      for (final topic in geos)
+        for (final relay in closestGeoRelays(topic)) relay.url,
+    };
+    if (setEquals(next, currentGeoRelays)) return;
+    currentGeoRelays
+      ..clear()
+      ..addAll(next);
+    applyGeoRelays();
   }
 
   // Geo-relay keep-alive

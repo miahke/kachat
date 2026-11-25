@@ -36,6 +36,16 @@ class TorFake extends QwdttController {
 }
 
 void main() {
+  testWidgets('stopping Tor explicitly selects direct connection', (
+    tester,
+  ) async {
+    final c = TorFake();
+    await tester.pumpWidget(MaterialApp(home: TorPage(controller: c)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Выключить Tor'));
+    expect(c.calls.single.$1, 'direct');
+    c.dispose();
+  });
   testWidgets('pasted plain bridge selects the real bridge mode', (
     tester,
   ) async {

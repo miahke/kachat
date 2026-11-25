@@ -78,6 +78,12 @@ import '../../core/theme/nym_a11y.dart';
 
 enum _SectionId { channels, pms, nyms }
 
+const _defaultSectionOrder = [
+  _SectionId.pms,
+  _SectionId.channels,
+  _SectionId.nyms,
+];
+
 extension _SectionIdName on _SectionId {
   /// Matches the PWA `data-section` values.
   String get id => switch (this) {
@@ -122,6 +128,7 @@ class Sidebar extends ConsumerStatefulWidget {
 
 class _SidebarState extends ConsumerState<Sidebar> {
   Timer? _rowClock;
+  DateTime? _lastProfileCheck;
 
   final Set<_SectionId> _collapsed = {};
 
@@ -185,7 +192,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
   @override
   void initState() {
     super.initState();
-    _order = List.of(_SectionId.values);
+    _order = List.of(_defaultSectionOrder);
     _skelTimer = Timer(const Duration(seconds: 8), () {
       if (mounted) setState(() => _skelTimedOut = true);
     });
@@ -227,7 +234,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
       for (final s in stored) {
         if (!next.contains(s)) next.add(s);
       }
-      for (final s in _SectionId.values) {
+      for (final s in _defaultSectionOrder) {
         if (!next.contains(s)) next.add(s);
       }
       _order = next;
@@ -449,7 +456,13 @@ class _SidebarState extends ConsumerState<Sidebar> {
     ]);
   }
 
-  void _ensurePmProfiles() {
+  void _ensurePmProfiles({bool force = false}) {
+    final now = DateTime.now();
+    final last = _lastProfileCheck;
+    if (!force && last != null && now.difference(last) < const Duration(seconds: 5)) {
+      return;
+    }
+    _lastProfileCheck = now;
     ref
         .read(nostrControllerProvider)
         .ensureProfiles([for (final p in ref.read(pmListProvider)) p.pubkey]);
@@ -468,7 +481,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
         ref.watch(chatLockBadgesProvider.select((b) => b.shown));
     ref.listen(sidebarChannelRowsProvider, (_, _) => _syncNav());
     ref.listen(sidebarPmRowsProvider, (_, _) {
-      _ensurePmProfiles();
+      _ensurePmProfiles(force: true);
       _syncNav();
     });
     _ensurePmProfiles();

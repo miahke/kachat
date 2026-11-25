@@ -181,12 +181,14 @@ class _TorPageState extends State<TorPage> {
                         label: const Text('Проверить HTTPS-соединение'),
                       ),
                     if (active && c.probeMessage != null) Text(c.probeMessage!),
-                    if (active && state != 'STOPPED')
+                    if (active && c.selected)
                       TextButton(
-                        onPressed: c.busy
-                            ? null
-                            : () => c.command('disconnect'),
-                        child: const Text('Остановить Tor'),
+                        onPressed: c.busy ? null : () => c.command('direct'),
+                        child: const Text('Выключить Tor'),
+                      ),
+                    if (active && c.selected)
+                      const Text(
+                        'После выключения включится прямое подключение.',
                       ),
                   ],
                 ),
