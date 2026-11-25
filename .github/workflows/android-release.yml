@@ -1,0 +1,217 @@
+name: Android release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified build as a GitHub release
+        type: boolean
+        default: false
+      tag:
+        description: New tag matching the version in flutter/pubspec.yaml
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kachat-release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FLUTTER_REVISION: c197ca5199e9ee5661e865596c9c07294dfab51c
+      RELEASE_CERT_SHA256: 1b3d863694156be2078b1d8a7bc1d2b692e4d93068b841e9638c16494c59d719
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check release ancestry and version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Release must run from main'; exit 1; }
+          latest=$(gh release view --json tagName --jq .tagName)
+          git fetch --no-tags origin "refs/tags/$latest:refs/tags/$latest"
+          git merge-base --is-ancestor "$latest" HEAD || {
+            echo "main does not contain the latest published release $latest"; exit 1;
+          }
+          python3 - <<'CHECK_VERSION'
+          import os, re, subprocess
+          from pathlib import Path
+          tag = os.environ['REQUESTED_TAG']
+          pubspec = Path('flutter/pubspec.yaml').read_text()
+          version = re.search(r'^version:\s*3\.75\.545-kachat\.(\d+)\+(\d+)\s*$', pubspec, re.M)
+          if not version:
+              raise SystemExit('Unexpected pubspec version format')
+          release_number, build_number = map(int, version.groups())
+          if tag != f'kachat-v3.75.545.{release_number}':
+              raise SystemExit('Tag must match the pubspec release number')
+          latest = subprocess.check_output(['gh', 'release', 'view', '--json', 'tagName', '--jq', '.tagName'], text=True).strip()
+          prior = subprocess.check_output(['git', 'show', f'{latest}:flutter/pubspec.yaml'], text=True)
+          prior_version = re.search(r'^version:\s*3\.75\.545-kachat\.(\d+)\+(\d+)\s*$', prior, re.M)
+          if not prior_version or release_number <= int(prior_version.group(1)) or build_number <= int(prior_version.group(2)):
+              raise SystemExit('Release and build numbers must exceed the latest published release')
+          gradle = Path('flutter/android/app/build.gradle').read_text()
+          if not re.search(r'versionCode\s*=\s*flutter\.versionCode', gradle):
+              raise SystemExit('Android versionCode must use the Flutter build number')
+          result = subprocess.run(['git', 'ls-remote', '--exit-code', '--tags', 'origin', f'refs/tags/{tag}'], stdout=subprocess.DEVNULL)
+          if result.returncode == 0:
+              raise SystemExit('Requested tag already exists')
+          if result.returncode != 2:
+              raise SystemExit('Could not verify whether the requested tag exists')
+          CHECK_VERSION
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Prepare Android and Flutter
+        shell: bash
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-$RUNNER_TEMP/android-sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\n' "$ANDROID_HOME" "$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$sdkmanager" ]]; then
+            tools_dir=$(mktemp -d "$RUNNER_TEMP/android-tools.XXXXXX")
+            curl --fail --silent --show-error --location --retry 3 \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+              --output "$tools_dir/cmdline-tools.zip"
+            unzip -q "$tools_dir/cmdline-tools.zip" -d "$tools_dir"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            mv "$tools_dir/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          (set +o pipefail; yes | "$sdkmanager" --licenses >/dev/null)
+          "$sdkmanager" 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          flutter_sdk="$RUNNER_TEMP/flutter-sdk"
+          git init --quiet "$flutter_sdk"
+          git -C "$flutter_sdk" remote add origin https://github.com/flutter/flutter.git
+          git -C "$flutter_sdk" fetch --depth=1 origin refs/tags/3.47.9:refs/tags/3.47.9
+          test "$(git -C "$flutter_sdk" rev-parse 'refs/tags/3.47.9^{commit}')" = "$FLUTTER_REVISION"
+          git -C "$flutter_sdk" checkout --quiet --detach FETCH_HEAD
+          printf '%s\n' "$flutter_sdk/bin" >> "$GITHUB_PATH"
+          "$flutter_sdk/bin/flutter" precache --android
+      - name: Run Flutter checks
+        working-directory: flutter
+        run: |
+          flutter analyze
+          flutter test --reporter expanded
+      - name: Run Android unit tests
+        working-directory: flutter/android
+        run: ./gradlew :app:testDebugUnitTest
+      - name: Verify native checksums
+        run: tools/arti-build/verify-checksums.sh
+      - name: Build and verify signed APKs
+        working-directory: flutter
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          umask 077
+          signing_dir=$(mktemp -d "$RUNNER_TEMP/kachat-signing.XXXXXX")
+          trap 'rm -rf -- "$signing_dir"' EXIT
+          export NYM_KEY_PROPERTIES="$signing_dir/key.properties"
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          source = {
+              'storePassword': 'ANDROID_KEYSTORE_PASSWORD',
+              'keyAlias': 'ANDROID_KEY_ALIAS',
+              'keyPassword': 'ANDROID_KEY_PASSWORD',
+          }
+          for name in ('ANDROID_KEYSTORE_BASE64', *source.values()):
+              if not os.environ.get(name):
+                  raise SystemExit(f'Missing Actions secret: {name}')
+
+          properties = Path(os.environ['NYM_KEY_PROPERTIES'])
+          keystore = properties.with_name('release.keystore')
+          keystore.write_bytes(base64.b64decode(os.environ['ANDROID_KEYSTORE_BASE64'], validate=True))
+          values = {key: os.environ[name] for key, name in source.items()}
+          values['storeFile'] = str(keystore)
+
+          def escape(value):
+              encoded = value.encode('utf-16-be').hex()
+              return ''.join('\\u' + encoded[i:i + 4] for i in range(0, len(encoded), 4))
+
+          properties.write_text(''.join(f'{key}={escape(value)}\n' for key, value in values.items()))
+          PY
+          unset ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD
+
+          flutter build apk --no-pub --release --obfuscate --split-debug-info="$signing_dir/symbols" \
+            --split-per-abi --target-platform android-arm,android-arm64,android-x64
+
+          apksigner="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            report=$("$apksigner" verify --print-certs "build/app/outputs/flutter-apk/app-$abi-release.apk")
+            digest=$(awk '/^Signer #[0-9]+ certificate SHA-256 digest: / { print tolower($NF) }' <<< "$report")
+            if [[ "$digest" != "$RELEASE_CERT_SHA256" ]]; then
+              echo "Unexpected signing certificate for $abi"
+              exit 1
+            fi
+            echo "Verified release certificate for $abi"
+          done
+
+      - name: Collect and checksum APKs
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p release-output
+          base_code=$(sed -n 's/^version:.*+\([0-9][0-9]*\)$/\1/p' flutter/pubspec.yaml)
+          [[ "$base_code" =~ ^[0-9]+$ ]]
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            apk="release-output/$REQUESTED_TAG-$abi.apk"
+            cp "flutter/build/app/outputs/flutter-apk/app-$abi-release.apk" "$apk"
+            "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$apk"
+            case "$abi" in armeabi-v7a) offset=1000 ;; arm64-v8a) offset=2000 ;; x86_64) offset=4000 ;; esac
+            package=$("$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$apk" | sed -n '1p')
+            [[ "$package" == "package: name='com.panchat.nym' versionCode='$((base_code + offset))' "* ]] || {
+              echo "Unexpected package or version code for $abi"; exit 1;
+            }
+          done
+          (cd release-output && sha256sum ./*.apk > SHA256SUMS)
+          printf 'Source commit: %s\nCertificate SHA-256: %s\n' "$GITHUB_SHA" "$RELEASE_CERT_SHA256" > release-output/verification.txt
+      - name: Save verified APKs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-android-apks
+          path: release-output/
+          if-no-files-found: error
+
+  publish:
+    needs: verify
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-android-apks
+          path: release-output
+      - name: Publish verified GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          cd release-output
+          sha256sum -c SHA256SUMS
+          gh api --method POST "repos/$GH_REPO/git/refs" \
+            -f "ref=refs/tags/$REQUESTED_TAG" -f "sha=$GITHUB_SHA" >/dev/null
+          gh release create "$REQUESTED_TAG" ./*.apk SHA256SUMS verification.txt \
+            --verify-tag --title "kachat ${REQUESTED_TAG#kachat-v}" \
+            --notes "Android release built and verified by GitHub Actions. Source commit: $GITHUB_SHA"
