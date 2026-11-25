@@ -1,0 +1,92 @@
+name: Android signing check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/android-signing-check]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FLUTTER_REVISION: c197ca5199e9ee5661e865596c9c07294dfab51c
+      RELEASE_CERT_SHA256: 1b3d863694156be2078b1d8a7bc1d2b692e4d93068b841e9638c16494c59d719
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Prepare Android and Flutter
+        shell: bash
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          printf 'JAVA_HOME=%s\n' "$JAVA_HOME" >> "$GITHUB_ENV"
+          printf '%s\n' "$JAVA_HOME/bin" >> "$GITHUB_PATH"
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          flutter_sdk="$RUNNER_TEMP/flutter-sdk"
+          git init --quiet "$flutter_sdk"
+          git -C "$flutter_sdk" fetch --depth=1 https://github.com/flutter/flutter.git "$FLUTTER_REVISION"
+          git -C "$flutter_sdk" checkout --quiet --detach FETCH_HEAD
+          printf '%s\n' "$flutter_sdk/bin" >> "$GITHUB_PATH"
+          "$flutter_sdk/bin/flutter" precache --android
+      - name: Run Flutter tests
+        working-directory: flutter
+        run: flutter test test/payments test/performance test/qwdtt
+      - name: Build and verify signed APKs
+        working-directory: flutter
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          umask 077
+          signing_dir=$(mktemp -d "$RUNNER_TEMP/kachat-signing.XXXXXX")
+          trap 'rm -rf -- "$signing_dir"' EXIT
+          export NYM_KEY_PROPERTIES="$signing_dir/key.properties"
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          source = {
+              'storePassword': 'ANDROID_KEYSTORE_PASSWORD',
+              'keyAlias': 'ANDROID_KEY_ALIAS',
+              'keyPassword': 'ANDROID_KEY_PASSWORD',
+          }
+          for name in ('ANDROID_KEYSTORE_BASE64', *source.values()):
+              if not os.environ.get(name):
+                  raise SystemExit(f'Missing Actions secret: {name}')
+
+          properties = Path(os.environ['NYM_KEY_PROPERTIES'])
+          keystore = properties.with_name('release.keystore')
+          keystore.write_bytes(base64.b64decode(os.environ['ANDROID_KEYSTORE_BASE64'], validate=True))
+          values = {key: os.environ[name] for key, name in source.items()}
+          values['storeFile'] = str(keystore)
+
+          def escape(value):
+              encoded = value.encode('utf-16-be').hex()
+              return ''.join('\\u' + encoded[i:i + 4] for i in range(0, len(encoded), 4))
+
+          properties.write_text(''.join(f'{key}={escape(value)}\n' for key, value in values.items()))
+          PY
+          unset ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD
+
+          flutter build apk --no-pub --release --obfuscate --split-debug-info="$signing_dir/symbols" \
+            --split-per-abi --target-platform android-arm,android-arm64,android-x64
+
+          apksigner="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          for abi in armeabi-v7a arm64-v8a x86_64; do
+            report=$("$apksigner" verify --print-certs "build/app/outputs/flutter-apk/app-$abi-release.apk")
+            digest=$(awk '/^Signer #[0-9]+ certificate SHA-256 digest: / { print tolower($NF) }' <<< "$report")
+            if [[ "$digest" != "$RELEASE_CERT_SHA256" ]]; then
+              echo "Unexpected signing certificate for $abi"
+              exit 1
+            fi
+            echo "Verified release certificate for $abi"
+          done
