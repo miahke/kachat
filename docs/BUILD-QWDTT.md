@@ -22,6 +22,9 @@ Configure Flutter's JDK with `flutter config --jdk-dir /path/to/jdk17` if anothe
 JDK is selected automatically. Release signing remains configured via an
 untracked `android/key.properties` or `NYM_KEY_PROPERTIES`; never commit keys.
 This fork uses `com.panchat.nym` and installs beside stock NYM and old panchat.
+For new releases, increase the build number after `+` in `flutter/pubspec.yaml`.
+Android takes its base version code from that build number; Flutter adds the
+ABI-specific offsets when producing split APKs.
 
 The prebuilt qWDTT executables include this fork’s manual captcha changes;
 SHA256 hashes are in `third_party/panchat-qwdtt/native-sha256.json` and sources
