@@ -44,7 +44,8 @@ jobs:
           flutter_sdk="$RUNNER_TEMP/flutter-sdk"
           git init --quiet "$flutter_sdk"
           git -C "$flutter_sdk" remote add origin https://github.com/flutter/flutter.git
-          git -C "$flutter_sdk" fetch --depth=1 origin "$FLUTTER_REVISION"
+          git -C "$flutter_sdk" fetch --depth=1 origin refs/tags/3.47.9:refs/tags/3.47.9
+          test "$(git -C "$flutter_sdk" rev-parse 'refs/tags/3.47.9^{commit}')" = "$FLUTTER_REVISION"
           git -C "$flutter_sdk" checkout --quiet --detach FETCH_HEAD
           printf '%s\n' "$flutter_sdk/bin" >> "$GITHUB_PATH"
           "$flutter_sdk/bin/flutter" precache --android
