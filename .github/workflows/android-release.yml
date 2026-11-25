@@ -183,6 +183,7 @@ jobs:
           done
           (cd release-output && sha256sum ./*.apk > SHA256SUMS)
           printf 'Source commit: %s\nCertificate SHA-256: %s\n' "$GITHUB_SHA" "$RELEASE_CERT_SHA256" > release-output/verification.txt
+          cp "docs/releases/$REQUESTED_TAG.md" release-output/RELEASE_NOTES.md
       - name: Save verified APKs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -214,4 +215,4 @@ jobs:
             -f "ref=refs/tags/$REQUESTED_TAG" -f "sha=$GITHUB_SHA" >/dev/null
           gh release create "$REQUESTED_TAG" ./*.apk SHA256SUMS verification.txt \
             --verify-tag --title "kachat ${REQUESTED_TAG#kachat-v}" \
-            --notes "Android release built and verified by GitHub Actions. Source commit: $GITHUB_SHA"
+            --notes-file RELEASE_NOTES.md

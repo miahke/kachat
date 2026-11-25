@@ -8939,8 +8939,11 @@ class NostrController {
     _emitSystemMessage(tr('Away message cleared - you are back!'));
   }
 
-  /// TODO(verify): a real clear needs an app_state clear API.
-  void cmdClear() => _emitSystemMessage(tr('Chat cleared'));
+  void cmdClear() {
+    final view = _ref.read(appStateProvider).view;
+    _ref.read(appStateProvider.notifier).clearConversation(view.storageKey);
+    _emitSystemMessage(tr('Chat cleared'));
+  }
 
   void cmdShare() {
     final state = _ref.read(appStateProvider);
