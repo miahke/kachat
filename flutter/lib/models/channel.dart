@@ -63,6 +63,26 @@ class ChannelEntry {
       );
 }
 
+/// Channels whose message archives should be restored in the chosen geo mode.
+Set<String> channelKeysForGeoMode(
+  Iterable<ChannelEntry> channels, {
+  required bool selectedOnly,
+  required Set<String> selectedGeoTopics,
+  String? activeChannel,
+}) {
+  final selected = selectedGeoTopics.map((g) => g.toLowerCase()).toSet();
+  final active = activeChannel?.toLowerCase();
+  return {
+    for (final channel in channels)
+      if (!selectedOnly ||
+          !channel.isGeohash ||
+          selected.contains(channel.key) ||
+          channel.key == active)
+        channel.key,
+    if (active != null && active.isNotEmpty) active,
+  };
+}
+
 /// Decodes a geohash to its center lat/lng.
 ({double lat, double lng}) decodeGeohash(String geohash) {
   double latMin = -90, latMax = 90, lngMin = -180, lngMax = 180;

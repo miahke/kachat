@@ -1589,6 +1589,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   /// Switches to a live, identity-backed empty state once an identity boots.
   void goLive(String pubkey, String nym) {
+    _lastSwitchWasBootRestore = false;
     _seenIds.clear();
     _nameTimes.clear();
     _seenCopyKeys.clear();
@@ -4193,6 +4194,22 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   int _viewSwitchCount = 0;
 
+  bool _restoringBootView = false;
+  bool _lastSwitchWasBootRestore = false;
+
+  bool get restoringBootView => _restoringBootView;
+  bool get lastSwitchWasBootRestore => _lastSwitchWasBootRestore;
+
+  /// Keeps the launch conversation list visible while a saved view is restored.
+  void restoreBootView(void Function() select) {
+    _restoringBootView = true;
+    try {
+      select();
+    } finally {
+      _restoringBootView = false;
+    }
+  }
+
   int get viewSwitchCount => _viewSwitchCount;
 
   final ValueNotifier<int> viewSwitches = ValueNotifier<int>(0);
@@ -4216,6 +4233,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     final viewGateFn = viewGate;
     if (viewGateFn != null && !viewGateFn(state.view, view)) return;
+    _lastSwitchWasBootRestore = _restoringBootView;
     _forceNewColumnHint = forceNewColumn;
     _viewSwitchCount++;
     viewSwitches.value = _viewSwitchCount;

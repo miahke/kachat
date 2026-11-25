@@ -2286,6 +2286,50 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       // Geohash settings are hidden in group-chat/PM-only mode.
       if (!s.groupChatPMOnlyMode) ...[
         _toggleSpec(
+          key: 'selectedGeoTopicsOnly',
+          label: tr('Only Selected Geotopics'),
+          hint: tr('Receive geotopic messages from the selected topics below. '
+              'An opened geotopic stays available while you read it. '
+              'Turn this off to receive all geotopics.'),
+          value: s.selectedGeoTopicsOnly,
+          onChanged: ctrl.setSelectedGeoTopicsOnly,
+        ),
+        if (s.selectedGeoTopicsOnly)
+          _GroupSpec(
+            text: tr('Selected Geotopics'),
+            child: FormGroup(
+              label: tr('Selected Geotopics'),
+              hint: tr('Select topics to keep receiving when they are closed.'),
+              child: Consumer(
+                builder: (context, ref, _) {
+                  ref.watch(appStateProvider.select(settingsChannelSignature));
+                  final topics = <String>{
+                    ...s.selectedGeoTopics,
+                    for (final channel in ref.read(appStateProvider).channels)
+                      if (channel.isGeohash) channel.key,
+                  }.toList()..sort();
+                  return SizedBox(
+                    height: 220,
+                    child: ListView.builder(
+                      itemCount: topics.length,
+                      itemBuilder: (context, index) {
+                        final topic = topics[index];
+                        return CheckboxListTile(
+                          key: ValueKey('geo-topic-$topic'),
+                          dense: true,
+                          title: Text('#$topic'),
+                          value: s.selectedGeoTopics.contains(topic),
+                          onChanged: (value) =>
+                              ctrl.setGeoTopicSelected(topic, value ?? false),
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        _toggleSpec(
           key: 'sortByProximity',
           label: tr('Sort Geohash Channels by Proximity'),
           hint: tr('Sort geohash channels by distance from your location'),
@@ -2592,18 +2636,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
         ),
-        // Only when a swipe action is Quick React.
-        if (s.swipeLeftAction == 'react' || s.swipeRightAction == 'react')
+      ],
           _GroupSpec(
-            text: tr(
-                'Quick React Emoji {emoji} Change Emoji always used when a '
-                'swipe gesture is set to "Quick React". Tap to choose from '
-                'the full emoji picker.',
-                {'emoji': s.swipeReactEmoji}),
+            text: tr('Quick React Emoji'),
             child: FormGroup(
               label: tr('Quick React Emoji'),
-              hint: tr('Emoji always used when a swipe gesture is set to '
-                  '"Quick React". Tap to choose from the full emoji picker.'),
+              hint: tr('Used for double-tap reactions and quick-react swipes. '
+                  'Choose an emoji from the picker.'),
               // A custom `:code:` preview renders as a 33x33 image; unicode uses the button's 22px font.
               child: Align(
                 alignment: Alignment.centerLeft,
@@ -2628,6 +2667,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
           ),
+      if (s.gesturesEnabled) ...[
         _GroupSpec(
           text: tr(
               'Swipe Sensitivity {options} How far you need to swipe before '

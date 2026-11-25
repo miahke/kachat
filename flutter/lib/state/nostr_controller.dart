@@ -86,6 +86,7 @@ import '../features/send_as/anon_lane.dart';
 import '../features/presence/nyms_online.dart';
 import '../features/send_as/send_as_service.dart';
 import '../features/send_as/send_as_transport.dart';
+import '../features/qwdtt/qwdtt_controller.dart';
 import '../features/settings/settings_helpers.dart' show LandingChannel;
 import '../services/filter/content_filter.dart';
 import '../services/filter/filter_packs.dart';
@@ -934,7 +935,10 @@ class NostrController {
 
       // Mirror Low Data Mode onto the relay layer whenever it flips, including via sync.
       settings.onLowDataModeChanged =
-          (enabled) => unawaited(_service?.setLowDataMode(enabled));
+          (enabled) => unawaited(_service?.setLowDataMode(
+              enabled || _ref.read(settingsProvider).selectedGeoTopicsOnly));
+
+      settings.onGeoTopicSelectionChanged = _onGeoTopicSelectionChanged;
 
       // Flip the critical REQ's channel-mode gate; the resubscribe is debounced.
       settings.onGroupChatPMOnlyModeChanged = _onGroupChatPMOnlyModeChanged;
@@ -988,7 +992,8 @@ class NostrController {
       final restoredView = bootView.apply();
       if (restoredView?.kind == ViewKind.channel) _persistJoinedChannels();
       // Seed Low Data Mode before the relay layer shards its geo relays.
-      if (_ref.read(settingsProvider).lowDataMode) {
+      if (_ref.read(settingsProvider).lowDataMode ||
+          _ref.read(settingsProvider).selectedGeoTopicsOnly) {
         unawaited(service.setLowDataMode(true));
       }
       // Critical REQ inputs from the hydrated caches, kept fresh via updateCriticalInputs.
@@ -1005,6 +1010,13 @@ class NostrController {
           onGlobalEmojiBlocks: _onGlobalEmojiBlocks,
         ),
         channelMode: !_ref.read(settingsProvider).groupChatPMOnlyMode,
+        selectedGeoTopicsOnly:
+            _ref.read(settingsProvider).selectedGeoTopicsOnly,
+        selectedGeoTopics: _ref.read(settingsProvider).selectedGeoTopics,
+        activeGeoTopic: bootState.view.kind == ViewKind.channel &&
+                isChannelGeohash(bootState.view.id)
+            ? bootState.view.id
+            : '',
         vouchAuthors: bootState.nymchatPubkeys,
         profileAuthors: [
           for (final c in bootState.pmConversations) c.pubkey,
@@ -1022,6 +1034,7 @@ class NostrController {
 
       // Seed the sidebar with the common channels.
       discoverChannels();
+      unawaited(_connectSelectedGeoRelays());
 
       // No-op on boot; kept for the one-hop vouch expansion.
       _subscribeVouches();
@@ -1104,6 +1117,31 @@ class NostrController {
     switchChannel(gh, geohash: isChannelGeohash(gh) ? gh : '');
     discoverChannels();
     unawaited(_restoreAllChannelArchives());
+  }
+
+  void _onGeoTopicSelectionChanged() {
+    final settings = _ref.read(settingsProvider);
+    if (!settings.selectedGeoTopicsOnly) {
+      _service?.cancelSelectedGeoRelaySync();
+    }
+    _service?.updateCriticalInputs(
+      selectedGeoTopicsOnly: settings.selectedGeoTopicsOnly,
+      selectedGeoTopics: settings.selectedGeoTopics,
+    );
+    unawaited(_service?.setLowDataMode(
+        settings.lowDataMode || settings.selectedGeoTopicsOnly) ?? Future.value());
+    unawaited(_connectSelectedGeoRelays());
+    if (settings.selectedGeoTopicsOnly) unawaited(_restoreAllChannelArchives());
+  }
+
+  Future<void> _connectSelectedGeoRelays() async {
+    final settings = _ref.read(settingsProvider);
+    if (!settings.selectedGeoTopicsOnly) return;
+    final view = _ref.read(appStateProvider).view;
+    await _service?.syncSelectedGeoRelays([
+      ...settings.selectedGeoTopics,
+      if (view.kind == ViewKind.channel && isChannelGeohash(view.id)) view.id,
+    ]);
   }
 
   ChatView? _latestPmOrGroupView() {
@@ -1502,13 +1540,17 @@ class NostrController {
       bool skipCovered = true}) async {
     await _discoverChannelActivity();
     if (_retired) return;
-    final keys = <String>{
-      for (final c in _ref.read(appStateProvider).channels) c.key,
-    };
-    final view = _ref.read(appStateProvider).view;
+    final state = _ref.read(appStateProvider);
+    final settings = _ref.read(settingsProvider);
+    final view = state.view;
     final open =
         view.kind == ViewKind.channel && view.id.isNotEmpty ? view.id : null;
-    if (open != null) keys.add(open);
+    final keys = channelKeysForGeoMode(
+      state.channels,
+      selectedOnly: settings.selectedGeoTopicsOnly,
+      selectedGeoTopics: settings.selectedGeoTopics.toSet(),
+      activeChannel: open,
+    );
     if (!paced) {
       await _backfillChannelArchivesFor(keys, force: force, sinceSec: sinceSec);
       return;
@@ -1585,6 +1627,16 @@ class NostrController {
       }
       for (final storageKey in _ref.read(appStateProvider).messages.keys) {
         if (storageKey.startsWith('#')) known.add(storageKey.substring(1));
+      }
+      final settings = _ref.read(settingsProvider);
+      if (settings.selectedGeoTopicsOnly) {
+        final selected = settings.selectedGeoTopics.toSet();
+        final view = _ref.read(appStateProvider).view;
+        if (view.kind == ViewKind.channel && isChannelGeohash(view.id)) {
+          selected.add(view.id.toLowerCase());
+        }
+        known.removeWhere(
+            (key) => isChannelGeohash(key) && !selected.contains(key));
       }
 
       // Failures already resolve to empty results.
@@ -1880,6 +1932,7 @@ class NostrController {
     settings.activePubkey = null;
     settings.onKeypairModeChanged = null;
     settings.onLowDataModeChanged = null;
+    settings.onGeoTopicSelectionChanged = null;
     settings.onGroupChatPMOnlyModeChanged = null;
     // The binding captured the old storage sync.
     _ref.read(appStateProvider.notifier).onViewOpened = null;
@@ -6145,8 +6198,7 @@ class NostrController {
       badge: badge,
       emojiTags: [
         ...sender.stash.emojiTagsFor(content),
-        ...media_notes.imetaTagsForContent(
-            content, _ref.read(mediaFallbacksProvider).fallbacksFor),
+        ..._mediaImetaTags(content),
         ...quoteTagsForContent(content),
       ],
       powDifficulty: sender.powDifficulty,
@@ -8406,10 +8458,17 @@ class NostrController {
         ..._ref
             .read(liveCustomEmojiProvider.notifier)
             .emojiTagsForContent(content, anon: anon),
-        ...media_notes.imetaTagsForContent(
-            content, _ref.read(mediaFallbacksProvider).fallbacksFor),
+        ..._mediaImetaTags(content),
         ...quoteTagsForContent(content),
       ];
+
+  List<List<String>> _mediaImetaTags(String content) {
+    final media = _ref.read(mediaFallbacksProvider);
+    return mergeImetaTags([
+      ...media_notes.imetaTagsForContent(content, media.fallbacksFor),
+      ...media.imetaTagsForContent(content),
+    ]);
+  }
 
   final Map<String, String> _quoteSources = <String, String>{};
 
@@ -12022,6 +12081,10 @@ class NostrController {
   void switchChannel(String channel, {String geohash = ''}) {
     final appState = _ref.read(appStateProvider.notifier);
     appState.switchChannel(channel, geohash: geohash);
+    _service?.updateCriticalInputs(activeGeoTopic:
+        isChannelGeohash(geohash.isNotEmpty ? geohash : channel)
+            ? (geohash.isNotEmpty ? geohash : channel)
+            : '');
     _persistJoinedChannels();
     _subscribeActiveChannelTyping();
     // Connect the closest geo relays for a geohash channel.
@@ -13260,6 +13323,11 @@ class NostrController {
 
   /// Fetches the opened conversation's D1 archive (channels and groups; PMs restore at boot); best-effort.
   void _onViewOpened(ChatView view) {
+    _service?.updateCriticalInputs(activeGeoTopic:
+        view.kind == ViewKind.channel && isChannelGeohash(view.id)
+            ? view.id
+            : '');
+    unawaited(_connectSelectedGeoRelays());
     rememberLastView(_ref.read(keyValueStoreProvider), view);
     // Reading a conversation clears its bell entries without opening the modal.
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -16736,31 +16804,52 @@ class NostrController {
     final authHeader = blossomAuthHeader(
         hashHex, DateTime.now().millisecondsSinceEpoch ~/ 1000);
 
-    final api = ApiClient();
+    final routing = QwdttController.instance;
+    final session = routing.supported ? routing.beginMediaSession() : null;
+    if (routing.supported && session == null) {
+      lastUploadFailure = 'Network route unavailable';
+      return null;
+    }
+    ApiClient? attemptApi;
+    var sessionTransferred = false;
     try {
       final done = await _blossomUploader.upload(kBlossomServers, contentType,
           (server, type) async {
-        final data =
-            await api.uploadBlob(bytes, server, authHeader, contentType: type);
-        final url = data['url'];
-        return url is String ? url : null;
-      }, size: bytes.length);
-      if (done == null) {
-        lastUploadFailure = _blossomUploader.lastFailure;
+        final api = ApiClient();
+        attemptApi = api;
+        try {
+          final data = await api.uploadBlob(bytes, server, authHeader,
+              contentType: type, mediaSession: session);
+          final url = data['url'];
+          return url is String ? url : null;
+        } finally {
+          if (identical(attemptApi, api)) attemptApi = null;
+          api.dispose();
+        }
+      }, size: bytes.length, onTimeout: () {
+          session?.cancelActive();
+          attemptApi?.dispose();
+          attemptApi = null;
+        },
+          canContinue: session == null ? null : () => session.valid);
+      if (done == null || (session != null && !session.valid)) {
+        lastUploadFailure = session != null && !session.valid
+            ? 'Network route changed'
+            : _blossomUploader.lastFailure;
         return null;
       }
       lastUploadFailure = '';
       onProgress?.call(1.0);
       final fallbacks = _ref.read(mediaFallbacksProvider);
-      fallbacks.recordPredictedMirrors(done.url, [
-        for (final s in kBlossomServers)
-          if (s != done.server) predictMirrorUrl(s, hashHex, done.url),
-      ]);
-      unawaited(_mirrorBlobBackground(done.url, done.server, authHeader)
-          .then((mirrors) => fallbacks.recordConfirmedMirrors(done.url, mirrors)));
+      fallbacks.recordUpload(done.url, contentType);
+      sessionTransferred = session != null;
+      unawaited(_mirrorBlobBackground(done.url, done.server, authHeader, session)
+          .then((mirrors) => fallbacks.recordConfirmedMirrors(done.url, mirrors))
+          .whenComplete(() => session?.dispose()));
       return done.url;
     } finally {
-      api.dispose();
+      if (!sessionTransferred) session?.dispose();
+      attemptApi?.dispose();
     }
   }
 
@@ -16772,6 +16861,7 @@ class NostrController {
     String primaryUrl,
     String excludeServer,
     String authHeader,
+    MediaRouteSession? session,
   ) async {
     final remaining = kBlossomServers.where((s) => s != excludeServer).toList();
     final mirrors = <String>[];
@@ -16780,7 +16870,12 @@ class NostrController {
     try {
       await Future.wait(remaining.map((server) async {
         try {
-          final data = await api.mirrorBlob(primaryUrl, server, authHeader);
+          final data = await api.mirrorBlob(primaryUrl, server, authHeader,
+              mediaSession: session).timeout(const Duration(seconds: 30), onTimeout: () {
+            session?.cancelActive();
+            api.dispose();
+            throw TimeoutException('Blossom mirror timed out');
+          });
           final url = data['url'];
           if (url is String && url.isNotEmpty) mirrors.add(url);
         } catch (e) {
