@@ -431,6 +431,11 @@ class _MessageRowState extends ConsumerState<MessageRow>
     _quoteReply();
   }
 
+  void _doubleTapReact(Offset global) {
+    if (!_swipeApplies('react') || _hitsLinkOrAuthor(global)) return;
+    _quickReact(context, settings.swipeReactEmoji);
+  }
+
   void _secondaryClick(BuildContext context, Offset global) {
     final list = _listBody == null ? null : _list;
     final sel = list != null
@@ -1806,11 +1811,12 @@ class _MessageRowState extends ConsumerState<MessageRow>
           : body,
     );
     // Prism/hologram/frost overlays are content-scoped and painted by the content box, not the row.
-    return _SwipeToAct(
+    return MessageGestureSurface(
       settings: settings,
       applies: _swipeApplies,
       onAction: (a) => _dispatchSwipeAction(context, a),
       onDoubleClick: _doubleClick,
+      onDoubleTap: _doubleTapReact,
       // Quick-react popup anchored to the press point.
       onLongPressStart: (d) => _onMessageLongPress(context, d.globalPosition),
       onSecondaryTap: () => _openContextMenu(context),
@@ -2041,11 +2047,12 @@ class _MessageRowState extends ConsumerState<MessageRow>
     }
 
     // The whole row (name, bubble, extras) slides with a swipe, like the PWA.
-    final swiped = _SwipeToAct(
+    final swiped = MessageGestureSurface(
       settings: settings,
       applies: _swipeApplies,
       onAction: (a) => _dispatchSwipeAction(context, a),
       onDoubleClick: _doubleClick,
+      onDoubleTap: _doubleTapReact,
       // Quick-react popup anchored to the press point.
       onLongPressStart: (d) => _onMessageLongPress(context, d.globalPosition),
       onSecondaryTap: () => _openContextMenu(context),
@@ -2055,10 +2062,10 @@ class _MessageRowState extends ConsumerState<MessageRow>
       child: rowStack,
     );
 
-    // Snap-in overshoot entrance for a newly appended grouped bubble; disabled under reduced motion.
+    // Gentle entrance for a newly appended grouped bubble; disabled under reduced motion.
     Widget rowBody = swiped;
     if (_snapIn && !MediaQuery.of(context).disableAnimations) {
-      rowBody = _BubbleSnapIn(self: self, child: rowBody);
+      rowBody = MessageBubbleEntrance(self: self, child: rowBody);
     }
 
     // Negative CSS margins can't be expressed between list items, so gaps are driven from the top edge.
@@ -4906,64 +4913,30 @@ class RenderStickyAvatarTrack extends RenderProxyBox {
   }
 }
 
-/// 240ms overshoot snap-in for a live consecutive bubble; each keyframe segment uses the same cubic.
-class _BubbleSnapIn extends StatefulWidget {
-  const _BubbleSnapIn({required this.self, required this.child});
+/// A short, monotonic entrance for a live consecutive bubble.
+@visibleForTesting
+class MessageBubbleEntrance extends StatefulWidget {
+  const MessageBubbleEntrance({super.key, required this.self, required this.child});
 
   final bool self;
   final Widget child;
 
   @override
-  State<_BubbleSnapIn> createState() => _BubbleSnapInState();
+  State<MessageBubbleEntrance> createState() => _BubbleSnapInState();
 }
 
-class _BubbleSnapInState extends State<_BubbleSnapIn>
+class _BubbleSnapInState extends State<MessageBubbleEntrance>
     with SingleTickerProviderStateMixin {
-  static const Cubic _overshoot = Cubic(0.34, 1.56, 0.64, 1);
-
   late final AnimationController _c = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 240),
   )..forward();
 
-  late final Animation<double> _dy = TweenSequence<double>([
-    TweenSequenceItem(
-      tween: Tween(begin: -6.0, end: 2.0).chain(CurveTween(curve: _overshoot)),
-      weight: 55,
-    ),
-    TweenSequenceItem(
-      tween: Tween(begin: 2.0, end: -1.0).chain(CurveTween(curve: _overshoot)),
-      weight: 25,
-    ),
-    TweenSequenceItem(
-      tween: Tween(begin: -1.0, end: 0.0).chain(CurveTween(curve: _overshoot)),
-      weight: 20,
-    ),
-  ]).animate(_c);
-
-  late final Animation<double> _scale = TweenSequence<double>([
-    TweenSequenceItem(
-      tween: Tween(begin: 0.94, end: 1.02).chain(CurveTween(curve: _overshoot)),
-      weight: 55,
-    ),
-    TweenSequenceItem(
-      tween:
-          Tween(begin: 1.02, end: 0.995).chain(CurveTween(curve: _overshoot)),
-      weight: 25,
-    ),
-    TweenSequenceItem(
-      tween: Tween(begin: 0.995, end: 1.0).chain(CurveTween(curve: _overshoot)),
-      weight: 20,
-    ),
-  ]).animate(_c);
-
-  late final Animation<double> _opacity = TweenSequence<double>([
-    TweenSequenceItem(
-      tween: Tween(begin: 0.0, end: 1.0).chain(CurveTween(curve: _overshoot)),
-      weight: 55,
-    ),
-    TweenSequenceItem(tween: ConstantTween(1.0), weight: 45),
-  ]).animate(_c);
+  late final Animation<double> _progress =
+      CurvedAnimation(parent: _c, curve: Curves.easeOutCubic);
+  late final Animation<double> _dy = Tween(begin: -6.0, end: 0.0).animate(_progress);
+  late final Animation<double> _scale = Tween(begin: 0.96, end: 1.0).animate(_progress);
+  late final Animation<double> _opacity = Tween(begin: 0.0, end: 1.0).animate(_progress);
 
   @override
   void dispose() {
@@ -4976,8 +4949,7 @@ class _BubbleSnapInState extends State<_BubbleSnapIn>
     return AnimatedBuilder(
       animation: _c,
       builder: (context, child) => Opacity(
-        // The overshoot cubic exceeds 1.0 mid-segment, so opacity must clamp.
-        opacity: _opacity.value.clamp(0.0, 1.0),
+        opacity: _opacity.value,
         child: Transform.translate(
           offset: Offset(0, _dy.value),
           child: Transform.scale(
@@ -4995,12 +4967,15 @@ class _BubbleSnapInState extends State<_BubbleSnapIn>
 }
 
 /// Touch-only swipe-to-act; also hosts long-press quick-react and desktop double-click quote.
-class _SwipeToAct extends StatefulWidget {
-  const _SwipeToAct({
+@visibleForTesting
+class MessageGestureSurface extends StatefulWidget {
+  const MessageGestureSurface({
+    super.key,
     required this.settings,
     required this.applies,
     required this.onAction,
     required this.onDoubleClick,
+    required this.onDoubleTap,
     required this.onLongPressStart,
     required this.onSecondaryTap,
     required this.onSecondaryClick,
@@ -5015,6 +4990,7 @@ class _SwipeToAct extends StatefulWidget {
 
   final ValueChanged<String> onAction;
   final ValueChanged<Offset> onDoubleClick;
+  final ValueChanged<Offset> onDoubleTap;
 
   final GestureLongPressStartCallback onLongPressStart;
   final VoidCallback onSecondaryTap;
@@ -5028,10 +5004,10 @@ class _SwipeToAct extends StatefulWidget {
   final Widget child;
 
   @override
-  State<_SwipeToAct> createState() => _SwipeToActState();
+  State<MessageGestureSurface> createState() => _SwipeToActState();
 }
 
-class _SwipeToActState extends State<_SwipeToAct>
+class _SwipeToActState extends State<MessageGestureSurface>
     with SingleTickerProviderStateMixin {
   static const double _swipeStart = 16;
   static const double _edgeZone = 50;
@@ -5045,6 +5021,21 @@ class _SwipeToActState extends State<_SwipeToAct>
       );
 
   Offset? _clickFrom;
+  Offset? _lastTouchTap;
+  Timer? _touchTapTimer;
+
+  void _touchTapUp(TapUpDetails details) {
+    final previous = _lastTouchTap;
+    _touchTapTimer?.cancel();
+    if (previous != null &&
+        (details.globalPosition - previous).distance <= kDoubleTapSlop) {
+      _lastTouchTap = null;
+      widget.onDoubleTap(details.globalPosition);
+    } else {
+      _lastTouchTap = details.globalPosition;
+      _touchTapTimer = Timer(kDoubleTapTimeout, () => _lastTouchTap = null);
+    }
+  }
   Offset? _lastClickAt;
   Duration? _lastClickTime;
   int _clicks = 0;
@@ -5092,6 +5083,7 @@ class _SwipeToActState extends State<_SwipeToAct>
   @override
   void dispose() {
     widget.avatarDx?.value = 0;
+    _touchTapTimer?.cancel();
     _settleCtl?.dispose();
     super.dispose();
   }
@@ -5300,6 +5292,18 @@ class _SwipeToActState extends State<_SwipeToAct>
     return RawGestureDetector(
       behavior: HitTestBehavior.translucent,
       gestures: <Type, GestureRecognizerFactory>{
+        _TouchTapRecognizer:
+            GestureRecognizerFactoryWithHandlers<_TouchTapRecognizer>(
+          () => _TouchTapRecognizer(
+            debugOwner: this,
+            supportedDevices: const {
+              PointerDeviceKind.touch,
+              PointerDeviceKind.stylus,
+              PointerDeviceKind.invertedStylus,
+            },
+          ),
+          (r) => r.onTapUp = _touchTapUp,
+        ),
         if (!mouse)
           TapGestureRecognizer:
               GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
@@ -5334,6 +5338,10 @@ class _SwipeToActState extends State<_SwipeToAct>
       child: result,
     );
   }
+}
+
+class _TouchTapRecognizer extends TapGestureRecognizer {
+  _TouchTapRecognizer({super.debugOwner, super.supportedDevices});
 }
 
 class _SwipeDragRecognizer extends HorizontalDragGestureRecognizer {

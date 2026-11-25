@@ -41,7 +41,6 @@ class _BootGateState extends ConsumerState<BootGate> {
   void initState() {
     super.initState();
     _needsSetup = _computeNeedsSetup();
-    _firstIdentity = _needsSetup && _noOtherIdentity();
     _languageChosen =
         !needsFirstRunLanguage(ref.read(keyValueStoreProvider));
   }
@@ -50,20 +49,8 @@ class _BootGateState extends ConsumerState<BootGate> {
   bool _computeNeedsSetup() =>
       !hasChosenIdentity(ref.read(keyValueStoreProvider));
 
-  bool _firstIdentity = false;
-
-  bool _noOtherIdentity() {
-    final index = ref.read(accountsProvider)?.changes.value;
-    if (index == null) return true;
-    return !index.accounts
-        .any((a) => a.pubkey.isNotEmpty && a.id != index.active);
-  }
-
   void _onSetupComplete() {
     if (!mounted) return;
-    if (_firstIdentity) {
-      ref.read(chatListLandingProvider.notifier).state = true;
-    }
     setState(() => _needsSetup = false);
   }
 

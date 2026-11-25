@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../core/constants/storage_keys.dart';
+import 'channel.dart';
 import '../features/reactions/hover_actions.dart';
 import '../core/theme/nym_colors.dart';
 import '../services/platform/background_connectivity.dart';
@@ -13,6 +14,21 @@ enum ColorMode { auto, light, dark }
 
 /// Scope for read receipts, typing, status and image blur.
 enum ScopeSetting { everywhere, friends, disabled }
+
+List<String> _readSelectedGeoTopics(String? raw) {
+  if (raw == null) return const [];
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) return const [];
+    return List<String>.unmodifiable({
+      for (final item in decoded)
+        if (item is String && isValidGeohash(item) && item.toLowerCase() != 'nymchat')
+          item.toLowerCase(),
+    }.toList()..sort());
+  } catch (_) {
+    return const [];
+  }
+}
 
 /// App settings mirroring the PWA's `this.settings`; persisted one field per key.
 @immutable
@@ -36,6 +52,8 @@ class Settings {
     this.columnsWallpaper = false,
     this.threadsEnabled = true,
     this.lowDataMode = false,
+    this.selectedGeoTopicsOnly = false,
+    this.selectedGeoTopics = const [],
     this.backgroundConnectivity = false,
     this.meshEnabled = true,
     this.textSize = 15,
@@ -86,6 +104,8 @@ class Settings {
   /// Message threads (default on); off shows the classic flat view.
   final bool threadsEnabled;
   final bool lowDataMode;
+  final bool selectedGeoTopicsOnly;
+  final List<String> selectedGeoTopics;
 
   /// Keep relays and the mesh alive in the background; opt-in because it costs battery.
   final bool backgroundConnectivity;
@@ -166,6 +186,8 @@ class Settings {
     bool? columnsWallpaper,
     bool? threadsEnabled,
     bool? lowDataMode,
+    bool? selectedGeoTopicsOnly,
+    List<String>? selectedGeoTopics,
     bool? backgroundConnectivity,
     bool? meshEnabled,
     int? textSize,
@@ -216,6 +238,8 @@ class Settings {
       columnsWallpaper: columnsWallpaper ?? this.columnsWallpaper,
       threadsEnabled: threadsEnabled ?? this.threadsEnabled,
       lowDataMode: lowDataMode ?? this.lowDataMode,
+      selectedGeoTopicsOnly: selectedGeoTopicsOnly ?? this.selectedGeoTopicsOnly,
+      selectedGeoTopics: selectedGeoTopics ?? this.selectedGeoTopics,
       backgroundConnectivity:
           backgroundConnectivity ?? this.backgroundConnectivity,
       meshEnabled: meshEnabled ?? this.meshEnabled,
@@ -316,6 +340,10 @@ class Settings {
           kv.getBool(StorageKeys.columnsWallpaper, defaultValue: false),
       threadsEnabled: kv.getBool(StorageKeys.threadsEnabled, defaultValue: true),
       lowDataMode: kv.getBool(StorageKeys.lowDataMode, defaultValue: false),
+      selectedGeoTopicsOnly:
+          kv.getBool(StorageKeys.selectedGeoTopicsOnly, defaultValue: false),
+      selectedGeoTopics:
+          _readSelectedGeoTopics(kv.getString(StorageKeys.selectedGeoTopics)),
       backgroundConnectivity: kv.getBool(StorageKeys.backgroundConnectivity,
           defaultValue: BackgroundConnectivityService.isSupported),
       // On by default; the radio only starts once Bluetooth permission is granted.

@@ -126,8 +126,9 @@ class _ContentInfo {
 
 /// Flood tracker for the active conversation; content flood is scoped to the visible conversation too.
 final floodTrackerProvider = Provider<FloodTracker>((ref) {
-  final s = ref.watch(appStateProvider);
-  if (!s.clientGatesActive) return FloodTracker.empty;
+  final facts = ref.watch(appStateProvider.select(
+      (s) => (clientGatesActive: s.clientGatesActive, selfPubkey: s.selfPubkey)));
+  if (!facts.clientGatesActive) return FloodTracker.empty;
   final messages = ref.watch(messagesForCurrentViewProvider);
-  return FloodTracker.fromMessages(messages, selfPubkey: s.selfPubkey);
+  return FloodTracker.fromMessages(messages, selfPubkey: facts.selfPubkey);
 });

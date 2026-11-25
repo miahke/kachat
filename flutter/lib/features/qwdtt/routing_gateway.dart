@@ -5,6 +5,56 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+/// Conservative global-unicast policy for direct media destinations.
+/// Reject transition mechanisms and special-purpose ranges rather than attempting
+/// to interpret an embedded address or rely on local routing configuration.
+bool isPublicMediaAddress(InternetAddress address) {
+  final b = address.rawAddress;
+  if (address.type == InternetAddressType.IPv4) {
+    final a = b[0], c = b[1], d = b[2];
+    if (a == 0 ||
+        a == 10 ||
+        a == 127 ||
+        a >= 224 ||
+        (a == 100 && c >= 64 && c <= 127) ||
+        (a == 169 && c == 254) ||
+        (a == 172 && c >= 16 && c <= 31) ||
+        (a == 192 && c == 168) ||
+        (a == 192 && c == 0 && (d == 0 || d == 2)) ||
+        (a == 192 && c == 31 && d == 196) ||
+        (a == 192 && c == 52 && d == 193) ||
+        (a == 192 && c == 88 && d == 99) ||
+        (a == 192 && c == 175 && d == 48) ||
+        (a == 198 && (c == 18 || c == 19)) ||
+        (a == 198 && c == 51 && d == 100) ||
+        (a == 203 && c == 0 && d == 113)) {
+      return false;
+    }
+    return true;
+  }
+  if (address.type != InternetAddressType.IPv6 || b.length != 16) return false;
+  // Only 2000::/3. This excludes mapped IPv4, NAT64, ULA, link-local,
+  // multicast and unspecified/loopback addresses.
+  if ((b[0] & 0xe0) != 0x20) return false;
+  if (b[0] == 0x20 && b[1] == 0x02) return false; // 6to4
+  if (b[0] == 0x20 && b[1] == 0x01 && b[2] <= 1) {
+    return false; // IETF assignments
+  }
+  if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) {
+    return false;
+  }
+  if (b[0] == 0x3f && b[1] == 0xff && b[2] < 0x10) {
+    return false; // documentation
+  }
+  return true;
+}
+
+typedef MediaResolver = Future<List<InternetAddress>> Function(String host);
+typedef MediaConnector = Future<ConnectionTask<Socket>> Function(
+  InternetAddress address,
+  int port,
+);
+
 enum GatewayMode { blocked, direct, socks }
 
 class SocksTarget {
@@ -40,10 +90,18 @@ class SocksTarget {
 /// One local CONNECT adapter for the lifetime of an isolate. TLS stays end to end.
 /// Changing routes closes sockets, so pooled HttpClients cannot retain direct tunnels.
 class RoutingGateway {
-  RoutingGateway._(this._server, this.password) {
+  RoutingGateway._(
+    this._server,
+    this.password,
+    this._resolveMedia,
+    this._connectMedia,
+  ) {
     _listener = _server.listen(_accept);
   }
-  static Future<RoutingGateway> start() async {
+  static Future<RoutingGateway> start({
+    MediaResolver? resolveMedia,
+    MediaConnector? connectMedia,
+  }) async {
     final random = Random.secure();
     final token = base64Url.encode(
       List.generate(32, (_) => random.nextInt(256)),
@@ -51,10 +109,14 @@ class RoutingGateway {
     return RoutingGateway._(
       await ServerSocket.bind(InternetAddress.loopbackIPv4, 0),
       token,
+      resolveMedia ?? ((host) => InternetAddress.lookup(host)),
+      connectMedia ?? ((address, port) => Socket.startConnect(address, port)),
     );
   }
 
   final ServerSocket _server;
+  final MediaResolver _resolveMedia;
+  final MediaConnector _connectMedia;
   StreamSubscription<Socket>? _listener;
   final Set<Socket> _sockets = {};
   final Set<void Function()> _connecting = {};
@@ -69,6 +131,11 @@ class RoutingGateway {
   GatewayMode get mode => _mode;
   String get authorization =>
       'Basic ${base64.encode(utf8.encode('$username:$password'))}';
+
+  /// Generation-bound credential; every route switch invalidates it.
+  String? mediaCredential() => !_disposed && _mode != GatewayMode.blocked
+      ? '$password:media:$_generation'
+      : null;
 
   void block() => _switch(GatewayMode.blocked, null);
   void useDirect() => _switch(GatewayMode.direct, null);
@@ -121,8 +188,15 @@ class RoutingGateway {
     await socket.flush();
   }
 
-  Future<Socket> _connect(String host, int port, int generation) async {
-    final task = await Socket.startConnect(host, port);
+  Future<Socket> _connect(
+    Object host,
+    int port,
+    int generation, {
+    bool media = false,
+  }) async {
+    final task = media
+        ? await _connectMedia(host as InternetAddress, port)
+        : await Socket.startConnect(host, port);
     if (generation != _generation || _disposed) {
       task.cancel();
       throw const SocketException('Route changed');
@@ -167,11 +241,17 @@ class RoutingGateway {
           .skip(1)
           .where((s) => s.toLowerCase().startsWith('proxy-authorization:'))
           .toList();
+      final media = mediaCredential();
+      final mediaAuthorization = media == null
+          ? ''
+          : 'Basic ${base64.encode(utf8.encode('$username:$media'))}';
+      final supplied = auth.length == 1
+          ? auth.single.substring(auth.single.indexOf(':') + 1).trim()
+          : '';
+      final mediaAuth =
+          media != null && _constantEquals(supplied, mediaAuthorization);
       if (auth.length != 1 ||
-          !_constantEquals(
-            auth.single.substring(auth.single.indexOf(':') + 1).trim(),
-            authorization,
-          )) {
+          (!_constantEquals(supplied, authorization) && !mediaAuth)) {
         await _reply(client, 407);
         return;
       }
@@ -200,7 +280,29 @@ class RoutingGateway {
         return;
       }
       if (mode == GatewayMode.direct) {
-        upstream = await _connect(uri.host, uri.port, generation);
+        if (mediaAuth) {
+          final rawHost = uri.host.startsWith('[') && uri.host.endsWith(']')
+              ? uri.host.substring(1, uri.host.length - 1)
+              : uri.host;
+          final literal = InternetAddress.tryParse(rawHost);
+          final addresses = literal == null
+              ? await _resolveMedia(rawHost)
+                    .timeout(const Duration(seconds: 15))
+              : [literal];
+          if (generation != _generation || _disposed) return;
+          if (addresses.isEmpty ||
+              addresses.any((a) => !isPublicMediaAddress(a))) {
+            throw const SocketException('Media destination denied');
+          }
+          upstream = await _connect(
+            addresses.first,
+            uri.port,
+            generation,
+            media: true,
+          );
+        } else {
+          upstream = await _connect(uri.host, uri.port, generation);
+        }
       } else {
         if (target == null) {
           await _reply(client, 503);

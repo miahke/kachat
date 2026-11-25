@@ -11,12 +11,14 @@ import 'routing_gateway.dart';
 
 /// Native transport secrets are never included in user-visible status or diagnostics.
 class QwdttController extends ChangeNotifier {
-  QwdttController({MethodChannel? channel, bool Function()? supported})
+  QwdttController({MethodChannel? channel, bool Function()? supported, Future<RoutingGateway> Function()? gatewayFactory})
     : _channel = channel ?? const MethodChannel('app.panchat/qwdtt'),
-      _supported = supported ?? (() => Platform.isAndroid);
+      _supported = supported ?? (() => Platform.isAndroid),
+      _gatewayFactory = gatewayFactory ?? (() => RoutingGateway.start());
   static final instance = QwdttController();
   final MethodChannel _channel;
   final bool Function() _supported;
+  final Future<RoutingGateway> Function() _gatewayFactory;
   RoutingGateway? _gateway;
   Timer? _poll;
   Map<String, dynamic> _snapshot = {};
@@ -31,6 +33,29 @@ class QwdttController extends ChangeNotifier {
   String probeState = 'idle';
   String? probeMessage;
   HttpClient? _probeClient;
+  final Set<MediaRouteSession> _mediaSessions = {};
+
+  MediaRouteSession? beginMediaSession() {
+    final gateway = _gateway;
+    if (busy || gateway == null || _snapshot['selected'] is! bool) return null;
+    final direct = _snapshot['selected'] == false && reportedRoute == 'DIRECT';
+    if (direct && gateway.mode != GatewayMode.direct) return null;
+    if (!direct && (_snapshot['selected'] != true ||
+        !{'VK', 'TOR', 'PROXY'}.contains(reportedRoute) || state != 'READY' ||
+        gateway.mode != GatewayMode.socks)) {
+      return null;
+    }
+    final credential = gateway.mediaCredential();
+    if (credential == null) return null;
+    late final MediaRouteSession session;
+    session = MediaRouteSession._(gateway, credential, direct, () => _mediaSessions.remove(session));
+    _mediaSessions.add(session);
+    return session;
+  }
+
+  void _invalidateMediaSessions() {
+    for (final session in _mediaSessions.toList()) { session.dispose(); }
+  }
 
   /// True on platforms with the native routing stack; elsewhere this controller stays inert.
   bool get supported => _supported();
@@ -201,7 +226,7 @@ class QwdttController extends ChangeNotifier {
     if (_initialized || !_supported()) return;
     _initialized = true;
     // Default BLOCKED until persisted native selection is known, before any account/network boot.
-    _gateway = await RoutingGateway.start();
+    _gateway = await _gatewayFactory();
     HttpOverrides.global = QwdttHttpOverrides(_gateway!);
     final revision = _revision;
     try {
@@ -254,6 +279,7 @@ class QwdttController extends ChangeNotifier {
         ? '${value['generation']}:${socks['host']}:${socks['type']}:${socks['port']}:${socks['username']}:${socks['password']}'
         : 'BLOCKED';
     if (_routeKey != key) {
+      _invalidateMediaSessions();
       _probeClient?.close(force: true);
       probeState = 'idle';
       probeMessage = null;
@@ -305,6 +331,7 @@ class QwdttController extends ChangeNotifier {
         }.contains(method) ||
         (method == 'delete' && arguments?['id'] == activeId);
     try {
+      if (switching) _invalidateMediaSessions();
       if (method == 'connectTor') {
         await _channel.invokeMethod<void>('validateTor', arguments);
       }
@@ -359,6 +386,7 @@ class QwdttController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _invalidateMediaSessions();
     _disposed = true;
     _probeClient?.close(force: true);
     _poll?.cancel();
@@ -367,11 +395,47 @@ class QwdttController extends ChangeNotifier {
   }
 }
 
+/// Media operations pinned to one gateway generation.
+class MediaRouteSession {
+  MediaRouteSession._(this._gateway, this._credential, this.direct, this._onDispose);
+  final RoutingGateway _gateway;
+  final String _credential;
+  final bool direct;
+  final void Function() _onDispose;
+  final Set<HttpClient> _clients = {};
+  bool _active = true;
+  bool get valid => _active && _gateway.mediaCredential() == _credential;
+
+  HttpClient createClient() {
+    if (!valid) throw StateError('Media route changed');
+    final client = QwdttHttpOverrides(_gateway, password: _credential).createHttpClient(null);
+    _clients.add(client);
+    return client;
+  }
+
+  void releaseClient(HttpClient client) {
+    _clients.remove(client);
+    client.close(force: true);
+  }
+
+  void cancelActive() {
+    for (final client in _clients.toList()) { releaseClient(client); }
+  }
+
+  void dispose() {
+    if (!_active) return;
+    _active = false;
+    cancelActive();
+    _onDispose();
+  }
+}
+
 /// Every Dart HTTPS/WSS connection uses the lifetime loopback adapter, including DIRECT mode.
 /// Keeping a stable proxy endpoint lets route changes terminate pooled connections safely.
 class QwdttHttpOverrides extends HttpOverrides {
-  QwdttHttpOverrides(this.gateway);
+  QwdttHttpOverrides(this.gateway, {this.password});
   final RoutingGateway gateway;
+  final String? password;
   @override
   HttpClient createHttpClient(SecurityContext? context) {
     final client = super.createHttpClient(context);
@@ -380,7 +444,7 @@ class QwdttHttpOverrides extends HttpOverrides {
       '127.0.0.1',
       gateway.port,
       'panchat',
-      HttpClientBasicCredentials(gateway.username, gateway.password),
+      HttpClientBasicCredentials(gateway.username, password ?? gateway.password),
     );
     client.authenticateProxy = (host, port, scheme, realm) async {
       if (host != '127.0.0.1' ||
@@ -392,7 +456,7 @@ class QwdttHttpOverrides extends HttpOverrides {
         host,
         port,
         realm ?? 'panchat',
-        HttpClientBasicCredentials(gateway.username, gateway.password),
+        HttpClientBasicCredentials(gateway.username, password ?? gateway.password),
       );
       return true;
     };

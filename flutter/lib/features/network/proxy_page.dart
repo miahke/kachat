@@ -173,9 +173,10 @@ class _ProxyPageState extends State<ProxyPage> {
             ),
             if (c.probeMessage != null) Text(c.probeMessage!),
             OutlinedButton(
-              onPressed: c.busy ? null : () => c.command('disconnect'),
-              child: const Text('Остановить'),
+              onPressed: c.busy ? null : () => c.command('direct'),
+              child: const Text('Выключить прокси'),
             ),
+            const Text('После выключения включится прямое подключение.'),
           ],
           if (error != null || c.error != null)
             Text(
