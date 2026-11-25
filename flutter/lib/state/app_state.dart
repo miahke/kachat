@@ -274,6 +274,7 @@ class AppState {
     this.displayRev = 0,
     this.globalRev = 0,
     Map<String, int>? keyRevs,
+    Map<String, Expando<bool>>? clearedMessages,
     Map<String, int>? typing,
     Map<String, String>? typingActivity,
     Map<String, Poll>? polls,
@@ -292,6 +293,7 @@ class AppState {
     Set<String>? trustedPubkeys,
     Set<String>? archiveUnavailable,
   })  : keyRevs = keyRevs ?? <String, int>{},
+        _clearedMessages = clearedMessages ?? <String, Expando<bool>>{},
         typing = typing ?? <String, int>{},
         typingActivity = typingActivity ?? <String, String>{},
         polls = polls ?? <String, Poll>{},
@@ -341,6 +343,9 @@ class AppState {
 
   /// view storageKey → ordered messages (oldest first).
   final Map<String, List<Message>> messages;
+
+  /// Session-only display marks. Weak keys allow evicted rows to be collected.
+  final Map<String, Expando<bool>> _clearedMessages;
 
   final Map<String, List<MessageReaction>> reactions;
 
@@ -768,6 +773,7 @@ class AppState {
         displayRev: displayRev ?? this.displayRev,
         globalRev: globalRev ?? this.globalRev,
         keyRevs: keyRevs,
+        clearedMessages: _clearedMessages,
         typing: typing,
         typingActivity: typingActivity,
         polls: polls,
@@ -5884,6 +5890,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _scheduleEmit();
   }
 
+  /// Hides the conversation's current rows for this session.
+  void clearConversation(String storageKey) {
+    final messages = state.messages[storageKey];
+    if (messages == null || messages.isEmpty) return;
+    final cleared = state._clearedMessages.putIfAbsent(storageKey, Expando.new);
+    for (final message in messages) {
+      cleared[message] = true;
+    }
+    _scheduleEmitFor(storageKey);
+  }
+
   /// Like [addSystemMessage] but with an inline [SystemAction] button.
   void addSystemMessageWithAction(String content, SystemAction action,
       {String? storageKey}) {
@@ -5972,11 +5989,13 @@ List<Message> visibleMessagesFor(AppState s, String storageKey) {
     return <Message>[];
   }
   final list = s.messages[storageKey] ?? const <Message>[];
+  final cleared = s._clearedMessages[storageKey];
   // Fast path only when nothing can filter; the spam filter is on by default.
   final canFilter = _canFilter(s);
-  var visible = canFilter
-      ? list.where((m) => !s.isMessageFiltered(m)).toList()
-      : [...list];
+  var visible = cleared == null && !canFilter
+      ? [...list]
+      : list.where((m) => cleared?[m] != true &&
+          (!canFilter || !s.isMessageFiltered(m))).toList();
   if (visible.any((m) => m.expiresAt != null)) {
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     visible = visible.where((m) => !chatToolsHidden(m, nowSec)).toList();
