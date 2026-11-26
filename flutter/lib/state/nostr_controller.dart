@@ -1793,6 +1793,7 @@ class NostrController {
 
   /// Tears down the live session without touching persisted state, [AppState] or `_started`; panic passes `flush: false`.
   Future<void> _teardownLiveSession({bool flush = true}) async {
+    _teardownEpoch++;
     if (flush) {
       try {
         _flushQueuedGroupReactions();
@@ -2095,6 +2096,7 @@ class NostrController {
 
   bool _suspended = false;
   bool _retired = false;
+  int _teardownEpoch = 0;
 
   bool get suspended => _suspended;
 
@@ -2112,6 +2114,7 @@ class NostrController {
     String? targetId,
   }) async {
     if (_suspended) return;
+    _teardownEpoch++;
     _suspended = true;
     _service?.holdForSwitch();
     if (!persist) _storageSync?.haltDeposits();
@@ -9071,7 +9074,11 @@ class NostrController {
     String? banner,
     String? description,
     bool allowMemberInvites = true,
+    String? initialMessage,
+    void Function()? onInitialMessageError,
   }) async {
+    if (_suspended || _retired) return null;
+    final epoch = _teardownEpoch;
     final service = _service;
     final identity = _identity;
     final groups = _groups;
@@ -9093,10 +9100,36 @@ class NostrController {
       allowMemberInvites: allowMemberInvites,
       settings: _msgSettings,
     );
+    if (_suspended ||
+        _retired ||
+        epoch != _teardownEpoch ||
+        !identical(_service, service) ||
+        !identical(_identity, identity) ||
+        !identical(_groups, groups)) {
+      return null;
+    }
     if (group == null) return null;
     final appState = _ref.read(appStateProvider.notifier);
     appState.upsertGroup(group);
-    appState.switchView(ChatView.group(group.id));
+    final view = ChatView.group(group.id);
+    appState.switchView(view);
+    // Provider listeners can synchronously switch sessions during either update.
+    if (_suspended ||
+        _retired ||
+        epoch != _teardownEpoch ||
+        !identical(_service, service) ||
+        !identical(_identity, identity) ||
+        !identical(_groups, groups)) {
+      return null;
+    }
+    final initial = initialMessage?.trim() ?? '';
+    if (initial.isNotEmpty && !isCommandLine(_stripHiddenEmoji(initial).trim())) {
+      try {
+        await _sendMessageContent(_stripHiddenEmoji(initial), viewOverride: view);
+      } catch (_) {
+        onInitialMessageError?.call();
+      }
+    }
     return group;
   }
 
@@ -18040,6 +18073,8 @@ class NostrController {
   }
 
   Future<void> dispose() async {
+    _teardownEpoch++;
+    _retired = true;
     _answersClosed = true;
     _stopGeoPresenceSend();
     _geoPresenceViewSub?.close();

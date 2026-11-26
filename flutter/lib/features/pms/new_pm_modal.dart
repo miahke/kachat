@@ -18,6 +18,7 @@ import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/common/nym_label.dart';
 import '../../widgets/nym_icons.dart';
 import '../groups/group_invite_confirm.dart';
+import '../commands/command_registry.dart' show isCommandLine;
 import '../i18n/i18n.dart';
 import '../chat_lock/chat_lock_providers.dart';
 import '../../widgets/common/nym_sheet.dart';
@@ -94,6 +95,9 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
 
   /// Upload progress state: bar visibility, label, and fill fraction.
   bool _uploading = false;
+  bool _starting = false;
+  bool _groupCreated = false;
+  String? _startError;
   String _uploadLabel = tr('Uploading…');
   double _uploadProgress = 0;
 
@@ -289,32 +293,74 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
   }
 
   Future<void> _start() async {
-    if (_recipients.isEmpty) return;
+    if (_recipients.isEmpty || _starting) return;
     final controller = ref.read(nostrControllerProvider);
-    if (_recipients.length == 1) {
-      final r = _recipients.first;
-      controller.startPM(r.pubkey, nym: r.nym);
-    } else {
-      final name = _groupNameController.text.trim().isNotEmpty
-          ? _groupNameController.text.trim()
-          : _recipients.map((r) => stripPubkeySuffix(r.nym)).take(3).join(', ');
-      final description = _groupDescController.text.trim();
-      // Avatar and banner are hosted URLs, never local paths.
-      await controller.createGroup(
-        name,
-        _recipients.map((r) => r.pubkey).toList(),
-        avatar: _groupAvatarUrl,
-        banner: _groupBannerUrl,
-        description: description.isNotEmpty ? description : null,
-        allowMemberInvites: _allowInvites,
-      );
+    setState(() {
+      _starting = true;
+      _startError = null;
+    });
+    try {
+      final initial = _messageController.text.trim();
+      if (_recipients.length == 1) {
+        final r = _recipients.first;
+        controller.startPM(r.pubkey, nym: r.nym);
+        if (initial.isNotEmpty) {
+          await controller.sendCurrent(initial);
+        }
+      } else {
+        if (isCommandLine(initial)) {
+          setState(() {
+            _starting = false;
+            _startError = tr('Slash commands cannot be sent as an initial group message.');
+          });
+          return;
+        }
+        final name = _groupNameController.text.trim().isNotEmpty
+            ? _groupNameController.text.trim()
+            : _recipients.map((r) => stripPubkeySuffix(r.nym)).take(3).join(', ');
+        final description = _groupDescController.text.trim();
+        // Avatar and banner are hosted URLs, never local paths.
+        var sendError = false;
+        final created = await controller.createGroup(
+          name,
+          _recipients.map((r) => r.pubkey).toList(),
+          avatar: _groupAvatarUrl,
+          banner: _groupBannerUrl,
+          description: description.isNotEmpty ? description : null,
+          allowMemberInvites: _allowInvites,
+          initialMessage: initial,
+          onInitialMessageError: () => sendError = true,
+        );
+        if (!mounted) return;
+        if (created == null) {
+          setState(() {
+            _starting = false;
+            _startError =
+                tr('Could not start the conversation. Please try again.');
+          });
+          return;
+        }
+        if (sendError) {
+          setState(() {
+            _starting = false;
+            _groupCreated = true;
+            _startError = tr('Group created. Check the first message in the group; you can copy the text here before closing.');
+          });
+          return;
+        }
+      }
+      if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+        Navigator.of(context).pop();
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _starting = false;
+          _startError =
+              tr('Could not start the conversation. Please try again.');
+        });
+      }
     }
-    // Send the optional initial message into the newly active conversation.
-    final initial = _messageController.text.trim();
-    if (initial.isNotEmpty) {
-      await controller.sendCurrent(initial);
-    }
-    if (mounted) Navigator.of(context).pop();
   }
 
   @override
@@ -443,10 +489,24 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(32, 0, 32, 32),
-              child: DialogActions(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _cancelBtn(c),
-                  _startBtn(c),
+                  if (_startError != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Text(
+                        _startError!,
+                        key: const ValueKey('new-pm-start-error'),
+                        style: TextStyle(color: c.danger, fontSize: 11),
+                      ),
+                    ),
+                  DialogActions(
+                    children: [
+                      _cancelBtn(c),
+                      _startBtn(c),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -519,7 +579,7 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
   Widget _startBtn(NymColors c) {
     return DialogButton(
       label: _groupMode ? tr('Create') : tr('Start'),
-      onTap: _recipients.isNotEmpty ? _start : null,
+      onTap: _recipients.isNotEmpty && !_starting && !_groupCreated ? _start : null,
     );
   }
 
