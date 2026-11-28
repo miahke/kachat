@@ -175,6 +175,7 @@ class GroupManager {
     String? description,
     bool allowMemberInvites = true,
     MessagingSettings settings = const MessagingSettings(),
+    bool Function()? sessionIsCurrent,
   }) async {
     if (!_service.canSign) return null;
     final members = <String>{...memberPubkeys, selfPubkey}.toList();
@@ -210,17 +211,23 @@ class GroupManager {
     );
 
     // The first invite uses real pubkeys; no member keys exist yet.
-    await _service.publishGroupMessage(
+    final published = await _service.publishGroupMessage(
       rumor: rumor,
-      onWrap: _depositFor(rumor),
+      onWrap: (wrap) {
+        if (sessionIsCurrent?.call() ?? true) _depositFor(rumor)?.call(wrap);
+      },
       recipients: members,
       encryptTo: (pk) => pk,
       settings: settings,
-      kemKeyFor: kemKeyFor,
-      rootSeededFor: rootSeededFor,
-      layeredFor: layeredFor,
+      canPublish: sessionIsCurrent,
+      kemKeyFor: kemKeyFor == null ? null : (pk) =>
+          (sessionIsCurrent?.call() ?? true) ? kemKeyFor?.call(pk) : null,
+      rootSeededFor: rootSeededFor == null ? null : (pk) =>
+          (sessionIsCurrent?.call() ?? true) && (rootSeededFor?.call(pk) ?? false),
+      layeredFor: layeredFor == null ? null : (pk) =>
+          (sessionIsCurrent?.call() ?? true) && (layeredFor?.call(pk) ?? false),
     );
-    return group;
+    return published ? group : null;
   }
 
   /// Rotates the self ephemeral key and gift-wraps to each member; [extraTags] come prebuilt from the caller. Null if unsendable.

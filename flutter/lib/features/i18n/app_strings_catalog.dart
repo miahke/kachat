@@ -655,6 +655,7 @@ const List<String> kAppStringsCatalog = <String>[
   'Go forward',
   'Group',
   'Group created. Check the first message in the group; you can copy the text here before closing.',
+  'The group invite was queued, but the session changed. Check your groups before trying again.',
   'Group Avatar & Banner',
   'Group Chats & PMs Only Mode',
   'Group Chats & PMs Only Mode {options} Hides all geohash channels and focuses the app on group chats and private messages only. Reduces bandwidth by skipping channel subscriptions.',

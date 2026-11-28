@@ -19,6 +19,7 @@ import '../../widgets/common/nym_label.dart';
 import '../../widgets/nym_icons.dart';
 import '../groups/group_invite_confirm.dart';
 import '../commands/command_registry.dart' show isCommandLine;
+import '../emoji/emoji_block.dart' show hiddenEmojiProvider;
 import '../i18n/i18n.dart';
 import '../chat_lock/chat_lock_providers.dart';
 import '../../widgets/common/nym_sheet.dart';
@@ -308,7 +309,7 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
           await controller.sendCurrent(initial);
         }
       } else {
-        if (isCommandLine(initial)) {
+        if (isCommandLine(ref.read(hiddenEmojiProvider).strip(initial).trim())) {
           setState(() {
             _starting = false;
             _startError = tr('Slash commands cannot be sent as an initial group message.');
@@ -349,8 +350,24 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
           return;
         }
       }
-      if (mounted && ModalRoute.of(context)?.isCurrent == true) {
-        Navigator.of(context).pop();
+      if (mounted) {
+        final route = ModalRoute.of(context);
+        if (route != null && route.isActive) {
+          final navigator = Navigator.of(context);
+          if (route.isCurrent) {
+            navigator.pop();
+          } else {
+            navigator.removeRoute(route);
+          }
+        }
+      }
+    } on GroupCreationInterrupted catch (_) {
+      if (mounted) {
+        setState(() {
+          _starting = false;
+          _groupCreated = true;
+          _startError = tr('The group invite was queued, but the session changed. Check your groups before trying again.');
+        });
       }
     } catch (_) {
       if (mounted) {

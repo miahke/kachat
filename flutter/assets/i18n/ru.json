@@ -909,6 +909,7 @@
   "Green": "Зелёный",
   "Group": "Группа",
   "Group created. Check the first message in the group; you can copy the text here before closing.": "Группа создана. Проверьте первое сообщение в группе; перед закрытием вы можете скопировать текст здесь.",
+  "The group invite was queued, but the session changed. Check your groups before trying again.": "Приглашение в группу поставлено в очередь, но сеанс изменился. Проверьте список групп, прежде чем повторять попытку.",
   "Group Avatar & Banner": "Аватар и баннер группы",
   "Group Chats & PMs Only Mode": "Режим только групповых чатов и личных сообщений",
   "Group Chats & PMs Only Mode {options} Hides all geohash channels and focuses the app on group chats and private messages only. Reduces bandwidth by skipping channel subscriptions.": "Режим только групповых чатов и личных сообщений {options} Скрывает все геохеш-каналы, оставляя только групповые чаты и личные сообщения. Экономит трафик, не подписываясь на каналы.",

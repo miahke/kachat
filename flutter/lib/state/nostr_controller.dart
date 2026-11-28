@@ -197,6 +197,11 @@ class _PendingDm {
 }
 
 /// Ties identity, relays and crypto to the [AppState] store; composer sends flow through here.
+/// The bootstrap invite was queued, but the session changed before setup completed.
+class GroupCreationInterrupted implements Exception {
+  const GroupCreationInterrupted();
+}
+
 class NostrController {
   NostrController(this._ref) {
     StorageGuard.pruners
@@ -1794,6 +1799,15 @@ class NostrController {
   /// Tears down the live session without touching persisted state, [AppState] or `_started`; panic passes `flush: false`.
   Future<void> _teardownLiveSession({bool flush = true}) async {
     _teardownEpoch++;
+    _activeTeardowns++;
+    try {
+      await _teardownLiveSessionBody(flush: flush);
+    } finally {
+      _activeTeardowns--;
+    }
+  }
+
+  Future<void> _teardownLiveSessionBody({required bool flush}) async {
     if (flush) {
       try {
         _flushQueuedGroupReactions();
@@ -2097,6 +2111,20 @@ class NostrController {
   bool _suspended = false;
   bool _retired = false;
   int _teardownEpoch = 0;
+  int _activeTeardowns = 0;
+
+  @visibleForTesting
+  void debugSetGroupSession(Identity identity, NostrService service, GroupManager groups) {
+    _identity = identity;
+    _service = service;
+    _groups = groups;
+  }
+
+  @visibleForTesting
+  Future<void> debugTeardownGroupSession() => _teardownLiveSession(flush: false);
+
+  @visibleForTesting
+  Future<void> Function(String, ChatView)? debugSendInitialGroupMessage;
 
   bool get suspended => _suspended;
 
@@ -8555,9 +8583,13 @@ class NostrController {
       _sendMessageContent(content, threadRoot: threadRoot, viewOverride: view);
 
   Future<void> _sendMessageContent(String content,
-      {String? threadRoot, ChatView? viewOverride, bool noThread = false}) async {
+      {String? threadRoot, ChatView? viewOverride, bool noThread = false,
+      bool reportGroupFailure = false, bool Function()? groupSessionIsCurrent}) async {
     final trimmed = content.trim();
     if (trimmed.isEmpty) return;
+    if (groupSessionIsCurrent != null && !groupSessionIsCurrent()) {
+      throw StateError('group session changed');
+    }
     // Every send marks us active and throttle-broadcasts presence.
     recordOwnActivity();
     final appState = _ref.read(appStateProvider.notifier);
@@ -8716,12 +8748,14 @@ class NostrController {
     if (view.kind == ViewKind.group) {
       final group = appState.groupById(view.id);
       if (service == null || identity == null || group == null) {
+        if (reportGroupFailure) throw StateError('group unavailable');
         appState.sendLocal(trimmed, viewOverride: view);
         return;
       }
       final blocked =
           _ref.read(groupToolsProvider).sendBlockedReason(group.id, trimmed);
       if (blocked != null) {
+        if (reportGroupFailure) throw StateError(blocked);
         _emitSystemMessage(blocked);
         return;
       }
@@ -8752,23 +8786,45 @@ class NostrController {
           ...GroupLogic.groupMetaPiggybackTags(group, identity.pubkey),
         ],
       );
-      await service.publishGroupMessage(
+      bool published;
+      try {
+        published = await service.publishGroupMessage(
         rumor: rumor,
         recipients: group.members,
+        canPublish: groupSessionIsCurrent,
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
         settings: _msgSettings,
-        onWrap: _archiveSentWrap,
-        kemKeyFor: _pqGroupKeyFor,
-        layeredFor: _pqGroupLayeredFor,
+        onWrap: (wrap) {
+          if (groupSessionIsCurrent?.call() ?? true) _archiveSentWrap(wrap);
+        },
+        kemKeyFor: (pk) => (groupSessionIsCurrent?.call() ?? true)
+            ? _pqGroupKeyFor(pk) : null,
+        layeredFor: (pk) => (groupSessionIsCurrent?.call() ?? true) &&
+            _pqGroupLayeredFor(pk),
         // Partial PQ coverage must not read as protected, so the badge carries the count.
-        rootSeededFor: pqPeerIsRootSeeded,
+        rootSeededFor: (pk) => (groupSessionIsCurrent?.call() ?? true) &&
+            pqPeerIsRootSeeded(pk),
         queuedKey: nymMessageId,
-        onCoverage: (pq, total, root) => appState.markOwnMessagePq(nymMessageId,
-            coverage: (pq: pq, total: total),
-            // Our root matters too: the self-archive copy is sealed to it.
-            pqRoot:
-                total > 0 && pq == total && root == total && _pqRoot != null),
+        onCoverage: (pq, total, root) {
+          if (!(groupSessionIsCurrent?.call() ?? true)) return;
+          appState.markOwnMessagePq(nymMessageId,
+              coverage: (pq: pq, total: total),
+              // Our root matters too: the self-archive copy is sealed to it.
+              pqRoot: total > 0 && pq == total && root == total && _pqRoot != null);
+        },
       );
+      } catch (_) {
+        if (groupEcho != null && (groupSessionIsCurrent?.call() ?? true)) {
+          appState.markOptimisticFailed(groupEcho.id);
+        }
+        rethrow;
+      }
+      if (!published && reportGroupFailure) {
+        if (groupEcho != null && (groupSessionIsCurrent?.call() ?? true)) {
+          appState.markOptimisticFailed(groupEcho.id);
+        }
+        throw StateError('group message could not be published');
+      }
     }
   }
 
@@ -9077,7 +9133,9 @@ class NostrController {
     String? initialMessage,
     void Function()? onInitialMessageError,
   }) async {
-    if (_suspended || _retired) return null;
+    if (_suspended || _retired || _activeTeardowns != 0 || PanicWipe.inProgress) return null;
+    final initial = _stripHiddenEmoji(initialMessage?.trim() ?? '').trim();
+    if (isCommandLine(initial)) return null;
     final epoch = _teardownEpoch;
     final service = _service;
     final identity = _identity;
@@ -9099,33 +9157,56 @@ class NostrController {
       description: description,
       allowMemberInvites: allowMemberInvites,
       settings: _msgSettings,
+      sessionIsCurrent: () => !PanicWipe.inProgress && !_suspended && !_retired &&
+          epoch == _teardownEpoch && identical(_service, service) &&
+          identical(_identity, identity) && identical(_groups, groups),
     );
-    if (_suspended ||
+    if (PanicWipe.inProgress ||
+        _suspended ||
         _retired ||
         epoch != _teardownEpoch ||
         !identical(_service, service) ||
         !identical(_identity, identity) ||
         !identical(_groups, groups)) {
+      if (group != null) throw const GroupCreationInterrupted();
       return null;
     }
     if (group == null) return null;
     final appState = _ref.read(appStateProvider.notifier);
     appState.upsertGroup(group);
-    final view = ChatView.group(group.id);
-    appState.switchView(view);
-    // Provider listeners can synchronously switch sessions during either update.
-    if (_suspended ||
+    if (PanicWipe.inProgress ||
+        _suspended ||
         _retired ||
         epoch != _teardownEpoch ||
         !identical(_service, service) ||
         !identical(_identity, identity) ||
         !identical(_groups, groups)) {
-      return null;
+      throw const GroupCreationInterrupted();
     }
-    final initial = initialMessage?.trim() ?? '';
-    if (initial.isNotEmpty && !isCommandLine(_stripHiddenEmoji(initial).trim())) {
+    final view = ChatView.group(group.id);
+    appState.switchView(view);
+    // Provider listeners can synchronously switch sessions during either update.
+    if (PanicWipe.inProgress ||
+        _suspended ||
+        _retired ||
+        epoch != _teardownEpoch ||
+        !identical(_service, service) ||
+        !identical(_identity, identity) ||
+        !identical(_groups, groups)) {
+      throw const GroupCreationInterrupted();
+    }
+    if (initial.isNotEmpty) {
       try {
-        await _sendMessageContent(_stripHiddenEmoji(initial), viewOverride: view);
+        final send = debugSendInitialGroupMessage;
+        if (send != null) {
+          await send(initial, view);
+        } else {
+          await _sendMessageContent(initial, viewOverride: view,
+              reportGroupFailure: true,
+              groupSessionIsCurrent: () => !PanicWipe.inProgress && !_suspended && !_retired &&
+                  epoch == _teardownEpoch && identical(_service, service) &&
+                  identical(_identity, identity) && identical(_groups, groups));
+        }
       } catch (_) {
         onInitialMessageError?.call();
       }
