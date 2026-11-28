@@ -2740,9 +2740,11 @@ class NostrService {
     void Function(int pqCount, int total, int rootCount)? onCoverage,
     Iterable<String> newMembers = const [],
     String? queuedKey,
+    bool Function()? canPublish,
   }) async {
     final sig = signer;
-    if (sig == null) return false;
+    if (sig == null || !(canPublish?.call() ?? true)) return false;
+    if (canPublish != null) recipients = List.of(recipients);
     final fresh = {
       for (final pk in newMembers)
         if (recipients.contains(pk)) pk
@@ -2796,6 +2798,22 @@ class NostrService {
         recipientKemPks: kemByTarget.isEmpty ? null : kemByTarget,
         layeredPubkeys: layeredTargets.isEmpty ? null : layeredTargets,
       );
+      if (canPublish != null &&
+          (!canPublish() || wraps.length != recipients.length || wraps.any((w) => w == null))) {
+        return false;
+      }
+      if (canPublish != null) {
+        for (var i = 0; i < wraps.length; i++) {
+          final wrap = wraps[i]!;
+          if (queuedKey != null) QueuedSends.instance.register(wrap.id, queuedKey);
+          publishDmQueued(wrap, tier: tierFor(recipients[i]));
+        }
+        for (final wrap in wraps) {
+          try { onWrap?.call(wrap!); } catch (_) {}
+        }
+        try { onCoverage?.call(pqCount, recipients.length, rootCount); } catch (_) {}
+        return true;
+      }
       for (var i = 0; i < wraps.length; i++) {
         final wrap = wraps[i];
         if (wrap != null) {
@@ -2808,6 +2826,38 @@ class NostrService {
         }
       }
       onCoverage?.call(pqCount, recipients.length, rootCount);
+      return true;
+    }
+
+    // For session-bound sends, build the entire fan-out before enqueueing any
+    // wraps, so cancellation or a failed signer cannot leave a partial retry.
+    if (canPublish != null) {
+      final wraps = <NostrEvent>[];
+      var pqCount = 0;
+      var rootCount = 0;
+      for (final pk in recipients) {
+        if (!canPublish()) return false;
+        final kem = kemOf?.call(pk);
+        if (kem != null) {
+          pqCount++;
+          if (rootSeededFor?.call(pk) ?? false) rootCount++;
+        }
+        final wrap = await _buildWrap(rumor, encryptTo(pk),
+            expiration: expiration, recipientKemPublicKey: kem,
+            layered: kem != null && layeredOf(pk));
+        if (wrap == null) return false;
+        wraps.add(wrap);
+      }
+      if (!canPublish()) return false;
+      for (var i = 0; i < wraps.length; i++) {
+        final wrap = wraps[i];
+        if (queuedKey != null) QueuedSends.instance.register(wrap.id, queuedKey);
+        publishDmQueued(wrap, tier: tierFor(recipients[i]));
+      }
+      for (final wrap in wraps) {
+        try { onWrap?.call(wrap); } catch (_) {}
+      }
+      try { onCoverage?.call(pqCount, recipients.length, rootCount); } catch (_) {}
       return true;
     }
 
